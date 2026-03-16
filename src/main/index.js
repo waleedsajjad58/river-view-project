@@ -458,9 +458,16 @@ ipcMain.handle('db:generate-monthly-bills', (_e, { billingMonth }) => {
                     }
                 }
 
-                // Carry forward arrears from previous unpaid bills
+                // Carry forward arrears: only sum each prior bill's OWN unpaid charges
+                // (subtotal + late_fee - amount_paid), NOT balance_due which includes cascaded arrears
                 const arrears = db.prepare(
-                    "SELECT COALESCE(SUM(balance_due), 0) as total FROM bills WHERE plot_id = ? AND billing_month < ? AND status IN ('unpaid', 'partial', 'overdue') AND is_deleted = 0"
+                    `SELECT COALESCE(SUM(
+                        CASE WHEN (subtotal + COALESCE(late_fee, 0) - amount_paid) > 0
+                             THEN (subtotal + COALESCE(late_fee, 0) - amount_paid)
+                             ELSE 0 END
+                    ), 0) as total FROM bills
+                    WHERE plot_id = ? AND billing_month < ? AND bill_type = 'monthly'
+                    AND status IN ('unpaid', 'partial', 'overdue') AND is_deleted = 0`
                 ).get(plot.id, billingMonth)?.total || 0;
 
                 if (items.length > 0) {
@@ -609,7 +616,9 @@ ipcMain.handle('db:record-payment', (_e, { billId, amount, paymentMethod, receip
     const db = getDb();
     return db.transaction(() => {
         const bill = db.prepare(`
-            SELECT b.bill_number, b.total_amount, b.amount_paid, b.balance_due, b.plot_id, p.plot_number
+            SELECT b.id, b.bill_number, b.total_amount, b.amount_paid, b.balance_due,
+                   b.plot_id, b.arrears, b.billing_month, b.subtotal, b.bill_type,
+                   COALESCE(b.late_fee, 0) as late_fee, p.plot_number
             FROM bills b LEFT JOIN plots p ON b.plot_id = p.id WHERE b.id = ?
         `).get(billId);
         if (!bill) throw new Error('Bill not found');
@@ -656,6 +665,59 @@ ipcMain.handle('db:record-payment', (_e, { billId, amount, paymentMethod, receip
         writeAuditLog(db, 'payments', paymentResult.lastInsertRowid, 'PAYMENT', {
             billId, amount, paymentMethod, receiptNumber: finalReceipt, billNumber: bill.bill_number
         });
+
+        // ── Cascade: distribute payment across old unpaid bills when arrears exist ──
+        // When a bill includes arrears and a payment is made, settle older bills
+        // proportionally. Full payment → all old bills marked paid.
+        // Partial payment → settle oldest bills first with the arrears portion.
+        if ((bill.arrears || 0) > 0 && bill.bill_type === 'monthly') {
+            const oldBills = db.prepare(
+                `SELECT id, balance_due, subtotal, COALESCE(late_fee, 0) as late_fee, amount_paid, total_amount
+                 FROM bills
+                 WHERE plot_id = ? AND billing_month < ? AND bill_type = 'monthly'
+                 AND status IN ('unpaid', 'partial', 'overdue') AND is_deleted = 0
+                 ORDER BY billing_month ASC`
+            ).all(bill.plot_id, bill.billing_month);
+
+            if (status === 'paid') {
+                // Full payment — all old bills are settled
+                for (const old of oldBills) {
+                    if (old.balance_due > 0) {
+                        db.prepare(
+                            `UPDATE bills SET amount_paid = total_amount, balance_due = 0,
+                             status = 'paid', updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+                        ).run(old.id);
+                    }
+                }
+            } else if (status === 'partial') {
+                // Partial payment — figure out how much goes toward arrears vs current charges
+                // The current bill's own charges = subtotal + late_fee (without arrears)
+                const ownCharges = (bill.subtotal || 0) + (bill.late_fee || 0);
+                // Total paid on this bill so far (after this payment)
+                const totalPaidOnBill = newPaid;
+                // Amount that exceeds own charges = amount available to settle old bills
+                const arrearsPayment = Math.max(0, totalPaidOnBill - ownCharges);
+
+                if (arrearsPayment > 0.01) {
+                    let remaining = arrearsPayment;
+                    for (const old of oldBills) {
+                        if (remaining <= 0.01) break;
+                        // Each old bill's own unpaid = its own charges minus what was paid on it
+                        const oldOwn = (old.subtotal || 0) + (old.late_fee || 0) - (old.amount_paid || 0);
+                        if (oldOwn <= 0) continue;
+                        const apply = Math.min(remaining, oldOwn);
+                        const newOldPaid = (old.amount_paid || 0) + apply;
+                        const newOldBalance = old.total_amount - newOldPaid;
+                        const oldStatus = newOldBalance <= 0.01 ? 'paid' : 'partial';
+                        db.prepare(
+                            `UPDATE bills SET amount_paid = ?, balance_due = ?,
+                             status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+                        ).run(newOldPaid, Math.max(0, newOldBalance), oldStatus, old.id);
+                        remaining -= apply;
+                    }
+                }
+            }
+        }
 
         // If overpayment, store excess as advance credit against the plot
         const overpaid = amount - bill.balance_due;

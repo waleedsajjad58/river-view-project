@@ -91,7 +91,7 @@ function BillsTable({ bills, loading, mode, onCollect, onStatement, onPrint }: {
           <tr>
             <th>Bill #</th><th>Plot</th>
             {mode === 'combined' && <th>Type</th>}
-            <th>{mode === 'tenant' ? 'Tenant' : 'Owner / Tenant'}</th>
+            <th>{mode === 'tenant' ? 'Tenant' : 'Owner'}</th>
             <th>Month</th>
             <th style={{ textAlign:'right' }}>Total</th>
             <th style={{ textAlign:'right' }}>Paid</th>
@@ -578,11 +578,10 @@ export default function BillingPage() {
     if (!ipc) return; setMonthlyLoading(true)
     try {
       const r = await ipc.invoke('db:get-bills', {
-        billingMonth: allMonths ? undefined : monthlyMonth,
+        billType:'monthly', billingMonth: allMonths ? undefined : monthlyMonth,
         allMonths, status: monthlyStatus !== 'all' ? monthlyStatus : undefined,
-        // no billType → fetches both 'monthly' and 'tenant' bills; special bills excluded below
       })
-      setMonthlyBills((r || []).filter((b: any) => b.bill_type !== 'special'))
+      setMonthlyBills(r || [])
     } finally { setMonthlyLoading(false) }
   }, [monthlyMonth, monthlyStatus, allMonths])
 
@@ -734,7 +733,7 @@ export default function BillingPage() {
           <KpiStrip bills={monthlyBills} />
           <FilterBar search={monthlySearch} onSearch={setMonthlySearch} month={monthlyMonth} onMonth={setMonthlyMonth}
             status={monthlyStatus} onStatus={setMonthlyStatus} allMonths={allMonths} onAllMonths={() => setAllMonths(v => !v)} />
-          <BillsTable bills={filterBills(monthlyBills, monthlySearch)} loading={monthlyLoading} mode="combined"
+          <BillsTable bills={filterBills(monthlyBills, monthlySearch)} loading={monthlyLoading} mode="monthly"
             onCollect={openPayment}
             onStatement={bill => setStatementBill(bill)}
             onPrint={handlePrint} />
