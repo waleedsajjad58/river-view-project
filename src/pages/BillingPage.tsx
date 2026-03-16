@@ -574,15 +574,6 @@ export default function BillingPage() {
   // Tenant statement
   const [statementBill,  setStatementBill]  = useState<any>(null)
 
-  const [showCashTransfer, setShowCashTransfer] = useState(false)
-
-  const [cashBalance, setCashBalance] = useState(0)
-
-  useEffect(() => {
-    if (!ipc) return
-    ipc.invoke('db:get-cash-balance').then((bal: number) => setCashBalance(bal || 0))
-  }, [])
-
   const loadMonthly = useCallback(async () => {
     if (!ipc) return; setMonthlyLoading(true)
     try {
@@ -705,14 +696,6 @@ export default function BillingPage() {
             {t.icon} {t.label}
           </button>
         ))}
-        <button onClick={() => setShowCashTransfer(true)}
-            style={{ display:'flex', alignItems:'center', gap:'0.4rem', padding:'0.42rem 1.1rem', borderRadius:'calc(var(--r-lg) - 3px)', fontSize:'0.84rem', fontWeight:500, border:'none', cursor:'pointer', background:'transparent', color:'var(--t-faint)' }}>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
-            <polyline points="9 22 9 12 15 12 15 22"/>
-          </svg>
-          Cash to Bank
-        </button>
       </div>
 
       {tab === 'generate' && (
@@ -933,34 +916,6 @@ export default function BillingPage() {
         </ModalOverlay>
       )}
 
-      {showCashTransfer && (
-        <ModalOverlay onClose={() => setShowCashTransfer(false)}>
-          <PanelShell width={420}>
-            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', padding:'1.25rem 1.5rem', borderBottom:'1px solid var(--border)' }}>
-              <h2 style={{ fontSize:'1rem', fontWeight:600, margin:0 }}>Transfer Cash to Bank</h2>
-              <button className="btn btn-ghost btn-sm" onClick={() => setShowCashTransfer(false)}><X size={16}/></button>
-            </div>
-            <div style={{ display:'flex', flexDirection:'column', gap:12, padding:20 }}>
-              <div style={{ margin:'1rem 1.25rem 0', padding:'0.75rem 1rem', background:'var(--bg-page)', border:'1px solid var(--border)', borderRadius:6, display:'flex', justifyContent:'space-between', alignItems:'center' }}>
-                <span style={{ fontSize:12, color:'var(--t-faint)' }}>Available Cash in Hand</span>
-                <span style={{ fontFamily:'IBM Plex Mono', fontWeight:700, color:'var(--t-primary)' }}>Rs. {cashBalance.toLocaleString()}</span>
-              </div>
-              <input type="date" defaultValue={new Date().toISOString().split('T')[0]}
-                id="ctb-date" className="input" />
-              <input type="number" placeholder="Amount (Rs.)" id="ctb-amount" className="input" />
-              <input type="text" placeholder="Notes (optional)" id="ctb-notes" className="input" />
-              <button className="btn btn-primary" onClick={async () => {
-                const date = (document.getElementById('ctb-date') as HTMLInputElement).value
-                const amount = parseFloat((document.getElementById('ctb-amount') as HTMLInputElement).value)
-                const notes = (document.getElementById('ctb-notes') as HTMLInputElement).value
-                if (!amount || amount <= 0) return
-                await ipc.invoke('db:cash-to-bank', { date, amount, notes })
-                setShowCashTransfer(false)
-              }}>Confirm Transfer</button>
-            </div>
-          </PanelShell>
-        </ModalOverlay>
-      )}
     </div>
   )
 }

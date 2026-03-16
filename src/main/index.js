@@ -7,7 +7,7 @@ import { writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { createHash } from 'crypto';
 import { initDatabase, getDb } from './database.js';
-import { generateChallanHTML, printChallan } from './challan-service.js';
+import { generateChallanHTML, printChallan, generateTransferSlipHTML } from './challan-service.js';
 
 // ── PIN hashing (SHA-256 — sufficient for offline single-user desktop app) ──
 const hashPin = (pin) => createHash('sha256').update(pin).digest('hex');
@@ -1488,6 +1488,11 @@ ipcMain.handle('db:print-html-report', (_e, html) => {
 
 ipcMain.handle('db:print-challan', (_e, { billId, amount }) => {
     const html = generateChallanHTML(billId, amount ?? null);
+    printChallan(html);
+});
+
+ipcMain.handle('db:print-cash-transfer', (_e, { date, amount, notes }) => {
+    const html = generateTransferSlipHTML({ date, amount, notes });
     printChallan(html);
 });
 

@@ -3,7 +3,7 @@ import { Routes, Route, NavLink, useLocation } from 'react-router-dom'
 import {
   LayoutDashboard, CreditCard, BookOpen, Settings,
   ChevronLeft, ChevronRight, BarChart3,
-  LogOut, Users, Map, Wallet, ScrollText, BookMarked, Landmark, FileUp, UserCheck
+  LogOut, Users, Map, Wallet, ScrollText, BookMarked, FileUp, UserCheck, Landmark
 } from 'lucide-react'
 
 import LoginPage from './pages/LoginPage'
@@ -12,7 +12,7 @@ import ImportPage from './pages/ImportPage'
 import BillingPage from './pages/BillingPage'
 import ExpenditurePage from './pages/ExpenditurePage'
 import CashBookPage from './pages/CashBookPage'
-import BankDepositsPage from './pages/BankDepositsPage'
+import CashToBankPage from './pages/CashToBankPage'
 import AccountLedgerPage from './pages/AccountLedgerPage'
 import JournalEntriesPage from './pages/JournalEntriesPage'
 import ReportsPage from './pages/ReportsPage'
@@ -68,8 +68,8 @@ export default function App() {
             <BookOpen size={16} />{!collapsed && <span>Cash Book</span>}
           </NavLink>
 
-          <NavLink to="/bank-deposits" className={() => `nav-item ${path === '/bank-deposits' ? 'active' : ''}`}>
-            <Landmark size={16} />{!collapsed && <span>Bank Deposits</span>}
+          <NavLink to="/cash-to-bank" className={() => `nav-item ${path === '/cash-to-bank' ? 'active' : ''}`}>
+            <Landmark size={16} />{!collapsed && <span>Cash to Bank</span>}
           </NavLink>
 
           <NavLink to="/ledger" className={() => `nav-item ${path === '/ledger' ? 'active' : ''}`}>
@@ -133,7 +133,7 @@ export default function App() {
           <Route path="/billing/*" element={<BillingPage />} />
           <Route path="/expenditures" element={<ExpenditurePage />} />
           <Route path="/cashbook" element={<CashBookPage />} />
-          <Route path="/bank-deposits" element={<BankDepositsPage />} />
+          <Route path="/cash-to-bank" element={<CashToBankPage />} />
           <Route path="/ledger" element={<AccountLedgerPage />} />
           <Route path="/journal" element={<JournalEntriesPage />} />
           <Route path="/reports" element={<ReportsPage />} />

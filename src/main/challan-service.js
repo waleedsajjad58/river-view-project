@@ -141,3 +141,137 @@ export function printChallan(html) {
         win.webContents.print({ silent: false, printBackground: true }, () => win.close());
     });
 }
+
+export function generateTransferSlipHTML({ date, amount, notes }) {
+    const templateHtml = readFileSync(resolveTemplatePath(), 'utf8');
+    // Extract logo <img> tag from the bill template
+    const logoMatch = templateHtml.match(/<img\s+src="data:image[^"]*"[^>]*>/);
+    const logoTag = logoMatch
+        ? logoMatch[0].replace(/style="[^"]*"/, '').replace(/>$/, ' style="width:100%;height:100%;object-fit:contain" />')
+        : '';
+    const logoHtml = logoTag
+        ? `<div style="width:52px;height:52px;flex-shrink:0">${logoTag}</div>`
+        : `<div style="width:52px;height:52px;border:2px solid #1a4a7a;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:#1a4a7a;text-align:center;line-height:1.2;background:#e8f0fb;flex-shrink:0">RV<br>CHS</div>`;
+
+    const fmtAmt = Number(amount).toLocaleString('en-PK');
+    const dateFormatted = fmtDate(date);
+    const desc = notes || 'Cash transferred to bank';
+
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<title>Cash to Bank Transfer Voucher</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=EB+Garamond:wght@400;600;700&family=Source+Sans+3:wght@400;600;700&display=swap');
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Source Sans 3', Arial, sans-serif; font-size: 11px; background: #f0ece4; padding: 10px; color: #111; }
+  .slip { width: 740px; margin: 0 auto 6px; border: 1.5px solid #999; background: #fff; position: relative; page-break-inside: avoid; }
+  .copy-label { position: absolute; right: -26px; top: 50%; transform: translateY(-50%) rotate(90deg); font-size: 9px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; background: #1a4a7a; color: #fff; padding: 3px 10px; white-space: nowrap; border-radius: 0 0 3px 3px; }
+  .bill-header { display: flex; align-items: center; background: #d0dff0; border-bottom: 1.5px solid #999; padding: 6px 10px; gap: 10px; }
+  .society-name { flex: 1; text-align: center; font-family: 'EB Garamond', Georgia, serif; font-size: 20px; font-weight: 700; color: #1a2e5a; letter-spacing: 0.5px; }
+  .bill-body { display: grid; grid-template-columns: 260px 1fr; min-height: 140px; }
+  .left-panel { border-right: 1.5px solid #999; padding: 8px 10px; display: flex; flex-direction: column; gap: 2px; }
+  .info-row { display: flex; gap: 4px; line-height: 1.7; }
+  .info-label { font-weight: 700; white-space: nowrap; min-width: 100px; }
+  .info-value { color: #222; }
+  .right-panel { padding: 0; }
+  .voucher-table { width: 100%; border-collapse: collapse; }
+  .voucher-table th { background: #1a4a7a; color: #fff; text-align: center; padding: 5px 8px; font-size: 11px; letter-spacing: 0.4px; }
+  .voucher-table td { padding: 4px 8px; border-bottom: 1px solid #e0e0e0; vertical-align: middle; line-height: 1.6; }
+  .voucher-table td:last-child { text-align: right; font-variant-numeric: tabular-nums; min-width: 80px; }
+  .voucher-table tr.amount-row td { font-weight: 700; font-size: 13px; background: #d0dff0; border-top: 1.5px solid #1a4a7a; }
+  .sig-row { display: flex; justify-content: space-between; padding: 20px 16px 8px; }
+  .sig { text-align: center; width: 140px; }
+  .sig-line { border-top: 1px solid #555; padding-top: 4px; font-size: 10px; color: #666; }
+  .bill-footer { border-top: 1.5px solid #999; text-align: center; padding: 4px 8px; font-size: 9.5px; color: #444; background: #f7f5f0; line-height: 1.6; }
+  .separator { width: 740px; margin: 0 auto; border: none; border-top: 2px dashed #aaa; margin-bottom: 6px; }
+  @media print { body { background: #fff; padding: 0; } .slip { margin: 0 auto; border: 1px solid #888; } .separator { border-color: #888; } }
+</style>
+</head>
+<body>
+
+<!-- ═══════ OFFICE COPY ═══════ -->
+<div class="slip">
+  <div class="copy-label">Office Copy</div>
+  <div class="bill-header">
+    ${logoHtml}
+    <div class="society-name">River View Co-operative Housing Society Ltd.</div>
+  </div>
+  <div class="bill-body">
+    <div class="left-panel">
+      <div style="text-align:center;font-weight:700;font-size:12px;text-decoration:underline;margin-bottom:4px;letter-spacing:0.5px">CASH TO BANK TRANSFER</div>
+      <div class="info-row"><span class="info-label">Date:</span><span class="info-value">${dateFormatted}</span></div>
+      <div class="info-row"><span class="info-label">Description:</span><span class="info-value">${desc}</span></div>
+      <div class="info-row"><span class="info-label">Voucher Type:</span><span class="info-value">Cash to Bank</span></div>
+      <div style="margin-top:auto;display:flex;justify-content:space-between;padding-top:8px">
+        <div class="sig"><div class="sig-line">Prepared By</div></div>
+        <div class="sig"><div class="sig-line">Authorised By</div></div>
+      </div>
+    </div>
+    <div class="right-panel">
+      <table class="voucher-table">
+        <thead><tr><th colspan="2">Transfer Details</th></tr></thead>
+        <tbody>
+          <tr><td>Debit: Allied Bank Ltd (1001)</td><td>Rs. ${fmtAmt}</td></tr>
+          <tr><td>Credit: Cash in Hand (1000)</td><td>Rs. ${fmtAmt}</td></tr>
+          <tr class="amount-row"><td>Amount Transferred</td><td>Rs. ${fmtAmt}</td></tr>
+        </tbody>
+      </table>
+      <div class="sig-row">
+        <div class="sig"><div class="sig-line">Cashier / Treasurer</div></div>
+        <div class="sig"><div class="sig-line">President / Secretary</div></div>
+      </div>
+    </div>
+  </div>
+  <div class="bill-footer">
+    Direct / Online Bill Payment, A/C # 2029-0015385-0201, Bank Islami, Thokar Niazbaig Branch, Lahore.<br>
+    WhatsApp: 03234148632, 03444000003 &nbsp;&middot;&nbsp; Ph. # 042-32294375
+  </div>
+</div>
+
+<hr class="separator"/>
+
+<!-- ═══════ BANK COPY ═══════ -->
+<div class="slip">
+  <div class="copy-label">Bank Copy</div>
+  <div class="bill-header">
+    ${logoHtml}
+    <div class="society-name">River View Co-operative Housing Society Ltd.</div>
+  </div>
+  <div class="bill-body">
+    <div class="left-panel">
+      <div style="text-align:center;font-weight:700;font-size:12px;text-decoration:underline;margin-bottom:4px;letter-spacing:0.5px">CASH TO BANK TRANSFER</div>
+      <div class="info-row"><span class="info-label">Date:</span><span class="info-value">${dateFormatted}</span></div>
+      <div class="info-row"><span class="info-label">Description:</span><span class="info-value">${desc}</span></div>
+      <div class="info-row"><span class="info-label">Voucher Type:</span><span class="info-value">Cash to Bank</span></div>
+      <div style="margin-top:auto;display:flex;justify-content:space-between;padding-top:8px">
+        <div class="sig"><div class="sig-line">Prepared By</div></div>
+        <div class="sig"><div class="sig-line">Authorised By</div></div>
+      </div>
+    </div>
+    <div class="right-panel">
+      <table class="voucher-table">
+        <thead><tr><th colspan="2">Transfer Details</th></tr></thead>
+        <tbody>
+          <tr><td>Debit: Allied Bank Ltd (1001)</td><td>Rs. ${fmtAmt}</td></tr>
+          <tr><td>Credit: Cash in Hand (1000)</td><td>Rs. ${fmtAmt}</td></tr>
+          <tr class="amount-row"><td>Amount Transferred</td><td>Rs. ${fmtAmt}</td></tr>
+        </tbody>
+      </table>
+      <div class="sig-row">
+        <div class="sig"><div class="sig-line">Cashier / Treasurer</div></div>
+        <div class="sig"><div class="sig-line">President / Secretary</div></div>
+      </div>
+    </div>
+  </div>
+  <div class="bill-footer">
+    Direct / Online Bill Payment, A/C # 2029-0015385-0201, Bank Islami, Thokar Niazbaig Branch, Lahore.<br>
+    WhatsApp: 03234148632, 03444000003 &nbsp;&middot;&nbsp; Ph. # 042-32294375
+  </div>
+</div>
+
+<script>window.onload = () => { window.print(); }<\/script>
+</body>
+</html>`;
+}

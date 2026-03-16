@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
-import { BookOpen, Search, TrendingUp, TrendingDown, Minus, Printer } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import { BookOpen, Search, TrendingUp, TrendingDown, Minus, Printer, BookMarked, ScrollText, BarChart3, ArrowRight } from 'lucide-react'
 
 const ipc = (window as any).ipcRenderer
 const fmt  = (n: number) => `Rs. ${(n || 0).toLocaleString()}`
@@ -39,7 +40,9 @@ const refLabel: Record<string, string> = {
 }
 
 export default function AccountLedgerPage() {
+  const navigate = useNavigate()
   const now  = new Date()
+  const [view,        setView]        = useState<'general' | 'accounts'>('general')
   const [accounts,    setAccounts]    = useState<any[]>([])
   const [selected,    setSelected]    = useState<any>(null)
   const [entries,     setEntries]     = useState<any[]>([])
@@ -177,6 +180,30 @@ export default function AccountLedgerPage() {
 
         {/* Grouped account list */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '8px 0' }}>
+
+          {/* ── General option ─────────────────────────────── */}
+          <button onClick={() => { setView('general'); setSelected(null) }}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 10, width: '100%',
+              padding: '9px 16px', border: 'none', cursor: 'pointer', textAlign: 'left',
+              background: view === 'general' ? '#eff6ff' : 'transparent',
+              borderLeft: view === 'general' ? '3px solid #1d4ed8' : '3px solid transparent',
+              transition: 'all 0.1s', marginBottom: 4,
+            }}
+          >
+            <BookMarked size={15} style={{ color: '#1d4ed8', flexShrink: 0 }} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: view === 'general' ? 700 : 500, color: 'var(--t-primary)' }}>
+                General
+              </div>
+              <div style={{ fontSize: 10.5, color: 'var(--t-faint)' }}>
+                Overview & quick access
+              </div>
+            </div>
+          </button>
+
+          <div style={{ height: 1, background: 'var(--border)', margin: '4px 16px 8px' }} />
+
           {typeOrder.map(type => {
             const list = grouped[type]
             if (!list?.length) return null
@@ -189,7 +216,7 @@ export default function AccountLedgerPage() {
                   {typeLabel[type]}
                 </div>
                 {list.map((a: any) => (
-                  <button key={a.id} onClick={() => setSelected(a)}
+                  <button key={a.id} onClick={() => { setView('accounts'); setSelected(a) }}
                     style={{
                       display: 'flex', alignItems: 'center', gap: 10, width: '100%',
                       padding: '7px 16px', border: 'none', cursor: 'pointer', textAlign: 'left',
@@ -217,7 +244,127 @@ export default function AccountLedgerPage() {
       {/* ── Main ledger view (right) ───────────────────────── */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: 'var(--bg-subtle)' }}>
 
-        {!selected ? (
+        {view === 'general' ? (
+          /* ── General hub view ──────────────────────────── */
+          <div style={{ flex: 1, overflowY: 'auto', padding: '32px 28px' }}>
+            <div style={{ marginBottom: 24 }}>
+              <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--t-primary)', letterSpacing: '-0.01em' }}>
+                General Ledger
+              </div>
+              <div style={{ fontSize: 13, color: 'var(--t-faint)', marginTop: 4 }}>
+                Access all ledger modules from here, or select an account from the left panel.
+              </div>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16 }}>
+              {[
+                {
+                  icon: BookOpen, label: 'Cash Book', route: '/cashbook', color: '#1d4ed8', bg: '#eff6ff',
+                  desc: 'Daily cash & bank transactions with running balances',
+                },
+                {
+                  icon: ScrollText, label: 'Journal Entries', route: '/journal', color: '#7c3aed', bg: '#f5f3ff',
+                  desc: 'Double-entry journal with debit & credit lines',
+                },
+                {
+                  icon: BarChart3, label: 'Reports', route: '/reports', color: '#15803d', bg: '#f0fdf4',
+                  desc: 'Trial Balance, Fund Summary & Income/Expenditure',
+                },
+              ].map(item => {
+                const Icon = item.icon
+                return (
+                  <button
+                    key={item.route}
+                    onClick={() => navigate(item.route)}
+                    style={{
+                      display: 'flex', alignItems: 'flex-start', gap: 14,
+                      padding: '20px', border: '1px solid var(--border)', borderRadius: 'var(--r-lg, 8px)',
+                      background: '#fff', cursor: 'pointer', textAlign: 'left',
+                      transition: 'all 0.15s',
+                    }}
+                    onMouseEnter={e => {
+                      e.currentTarget.style.borderColor = item.color
+                      e.currentTarget.style.boxShadow = `0 2px 8px ${item.color}18`
+                    }}
+                    onMouseLeave={e => {
+                      e.currentTarget.style.borderColor = 'var(--border)'
+                      e.currentTarget.style.boxShadow = 'none'
+                    }}
+                  >
+                    <div style={{
+                      width: 40, height: 40, borderRadius: 8, background: item.bg,
+                      display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+                    }}>
+                      <Icon size={20} style={{ color: item.color }} />
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--t-primary)' }}>
+                          {item.label}
+                        </span>
+                        <ArrowRight size={13} style={{ color: 'var(--t-faint)' }} />
+                      </div>
+                      <div style={{ fontSize: 12, color: 'var(--t-faint)', marginTop: 4, lineHeight: 1.4 }}>
+                        {item.desc}
+                      </div>
+                    </div>
+                  </button>
+                )
+              })}
+            </div>
+
+            {/* Account summary */}
+            {accounts.length > 0 && (
+              <div style={{ marginTop: 28 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--t-muted)', marginBottom: 12, fontFamily: 'IBM Plex Mono', letterSpacing: '0.04em' }}>
+                  CHART OF ACCOUNTS
+                </div>
+                <div style={{ background: '#fff', border: '1px solid var(--border)', borderRadius: 'var(--r-lg, 8px)', overflow: 'hidden' }}>
+                  {typeOrder.map(type => {
+                    const list = accounts.filter(a => a.account_type === type)
+                    if (!list.length) return null
+                    return (
+                      <div key={type} style={{ borderBottom: '1px solid var(--border)' }}>
+                        <div style={{
+                          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                          padding: '8px 16px', background: typeBg[type],
+                        }}>
+                          <span style={{ fontSize: 11, fontWeight: 700, color: typeColour[type], fontFamily: 'IBM Plex Mono', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+                            {typeLabel[type]}
+                          </span>
+                          <span style={{ fontSize: 11, color: 'var(--t-faint)' }}>
+                            {list.length} account{list.length !== 1 ? 's' : ''}
+                          </span>
+                        </div>
+                        {list.map(a => (
+                          <button key={a.id}
+                            onClick={() => { setView('accounts'); setSelected(a) }}
+                            style={{
+                              display: 'flex', alignItems: 'center', gap: 12, width: '100%',
+                              padding: '7px 16px', border: 'none', borderBottom: '1px solid var(--border)',
+                              cursor: 'pointer', textAlign: 'left', background: 'transparent',
+                              transition: 'background 0.1s',
+                            }}
+                            onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-subtle)'}
+                            onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                          >
+                            <span style={{ fontSize: 11.5, fontFamily: 'IBM Plex Mono', color: 'var(--t-faint)', minWidth: 44 }}>
+                              {a.account_code}
+                            </span>
+                            <span style={{ fontSize: 12.5, color: 'var(--t-primary)', flex: 1 }}>
+                              {a.account_name}
+                            </span>
+                            <ArrowRight size={12} style={{ color: 'var(--t-faint)' }} />
+                          </button>
+                        ))}
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        ) : !selected ? (
           /* Empty state */
           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: 'var(--t-faint)' }}>
             <BookOpen size={40} style={{ marginBottom: 12, opacity: 0.3 }} />
