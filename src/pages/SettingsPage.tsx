@@ -328,11 +328,11 @@ export default function SettingsPage() {
                                 </button>
                             </div>
                             <div style={{ padding: '1.25rem', background: 'var(--bg-card)', borderRadius: '10px', border: '1px solid var(--border)' }}>
-                                <h4 style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.75rem' }}><Download size={18} color="var(--success)" /> Export to CSV</h4>
+                                <h4 style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.75rem' }}><Download size={18} color="var(--success)" /> Export to Excel</h4>
                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                                     {['plots', 'members', 'bills', 'expenditures'].map(type => (
                                         <button key={type} className="btn btn-ghost" style={{ justifyContent: 'flex-start', border: '1px solid var(--border)', textTransform: 'capitalize' }}
-                                            onClick={() => ipc && ipc.invoke('db:export-csv', type)}>
+                                            onClick={() => ipc && ipc.invoke('db:export-spreadsheet', type)}>
                                             Export {type}
                                         </button>
                                     ))}

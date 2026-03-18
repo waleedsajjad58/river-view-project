@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Download, TrendingUp, FileText, Layers } from 'lucide-react'
+import { Download, TrendingUp, FileText, Layers, RefreshCw } from 'lucide-react'
+import { exportExcelFile } from '../utils/exportExcel'
 
 const ipc = (window as any).ipcRenderer
 
@@ -67,8 +68,8 @@ function TrialBalanceReport() {
                 <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} className="month-input" />
                 <span className="text-muted">to</span>
                 <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} className="month-input" />
-                <button className="btn btn-ghost" onClick={() => exportTableCSV('trial-balance', data, ['Account Code', 'Account Name', 'Type', 'Debit', 'Credit', 'Balance'])}>
-                    <Download size={16} /> Export CSV
+                <button className="btn btn-ghost" onClick={() => exportTableExcel('trial-balance', 'Trial Balance', data, ['Account Code', 'Account Name', 'Type', 'Debit', 'Credit', 'Balance'])}>
+                    <Download size={16} /> Export Excel
                 </button>
             </div>
 
@@ -151,8 +152,8 @@ function DefaulterReport() {
                         <strong style={{ fontSize: '1.4rem', color: '#f97316' }}>Rs. {totalDue.toLocaleString()}</strong>
                     </div>
                 </div>
-                <button className="btn btn-ghost" onClick={() => exportTableCSV('defaulters', data, ['Plot', 'Owner', 'Phone', 'Unpaid Bills', 'Amount Due', 'Days Overdue'])}>
-                    <Download size={16} /> Export CSV
+                <button className="btn btn-ghost" onClick={() => exportTableExcel('defaulters', 'Defaulters Report', data, ['Plot', 'Owner', 'Phone', 'Unpaid Bills', 'Amount Due', 'Days Overdue'])}>
+                    <Download size={16} /> Export Excel
                 </button>
             </div>
 
@@ -232,8 +233,8 @@ function CollectionSummary() {
                     <span className="text-muted" style={{ fontSize: '0.8rem' }}>Year Total</span>
                     <strong style={{ color: 'var(--success)' }}> Rs. {grandTotal.toLocaleString()}</strong>
                 </div>
-                <button className="btn btn-ghost" onClick={() => exportTableCSV('collection-summary', data, ['Month', 'Payments', 'Cash', 'Bank', 'Total'])}>
-                    <Download size={16} /> Export CSV
+                <button className="btn btn-ghost" onClick={() => exportTableExcel('collection-summary', 'Collection Summary', data, ['Month', 'Payments', 'Cash', 'Bank', 'Total'])}>
+                    <Download size={16} /> Export Excel
                 </button>
             </div>
 
@@ -389,73 +390,171 @@ function IncomeExpenditureReport() {
 // ── Fund Summary ──────────────────────────────────────────────
 
 function FundSummaryReport() {
-    const [data, setData] = useState<any[]>([])
+  const [data,       setData]       = useState<any[]>([])
+  const [startMonth, setStartMonth] = useState(() => {
+    const d = new Date(); d.setMonth(0); return d.toISOString().slice(0, 7)
+  })
+  const [endMonth,   setEndMonth]   = useState(() => new Date().toISOString().slice(0, 7))
+  const [loading,    setLoading]    = useState(false)
 
-    useEffect(() => {
-        if (!ipc) return
-        ipc.invoke('db:get-fund-summary').then(setData)
-    }, [])
+  const load = useCallback(async () => {
+    if (!ipc) return
+    setLoading(true)
+    try {
+      const rows = await ipc.invoke('db:get-fund-summary', {
+        startDate: startMonth,
+        endDate:   endMonth,
+      })
+      setData(rows || [])
+    } finally { setLoading(false) }
+  }, [startMonth, endMonth])
 
-    const total = data.reduce((s, r) => s + r.total_billed, 0)
+  useEffect(() => { load() }, [load])
 
-    return (
-        <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
-                <p style={{ color: 'var(--t-faint)', fontSize: '0.85rem', margin: 0 }}>
-                    All-time breakdown of billed amounts by charge type
-                </p>
-                <button className="btn btn-ghost" onClick={() => exportTableCSV('fund-summary', data, ['Charge', 'Items', 'Total Billed'])}>
-                    <Download size={16} /> Export CSV
-                </button>
-            </div>
-            <table className="data-table">
-                <thead>
-                    <tr>
-                        <th>Charge / Fund</th>
-                        <th style={{ textAlign: 'center' }}>Items</th>
-                        <th style={{ textAlign: 'right' }}>Total Billed (Rs.)</th>
-                        <th style={{ width: 180 }}>Share</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {data.length === 0 ? (
-                        <tr><td colSpan={4} className="empty-row">No billing data found.</td></tr>
-                    ) : data.map((r, i) => {
-                        const pct = total > 0 ? (r.total_billed / total) * 100 : 0
-                        return (
-                            <tr key={i}>
-                                <td style={{ fontWeight: 500 }}>{r.charge_name}</td>
-                                <td style={{ textAlign: 'center', color: 'var(--t-faint)' }}>{r.item_count}</td>
-                                <td style={{ textAlign: 'right', fontFamily: 'IBM Plex Mono', fontWeight: 600 }}>
-                                    {r.total_billed.toLocaleString()}
-                                </td>
-                                <td>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                        <div style={{ flex: 1, height: 6, background: 'var(--bg-subtle)', borderRadius: 3, overflow: 'hidden' }}>
-                                            <div style={{ width: `${pct}%`, height: '100%', background: 'var(--accent)', borderRadius: 3 }} />
-                                        </div>
-                                        <span style={{ fontSize: 11, fontFamily: 'IBM Plex Mono', color: 'var(--t-faint)', width: 36, textAlign: 'right' }}>
-                                            {pct.toFixed(1)}%
-                                        </span>
-                                    </div>
-                                </td>
-                            </tr>
-                        )
-                    })}
-                </tbody>
-                {data.length > 0 && (
-                    <tfoot>
-                        <tr style={{ borderTop: '2px solid var(--border)', fontWeight: 700 }}>
-                            <td>TOTAL</td>
-                            <td style={{ textAlign: 'center' }}>{data.reduce((s, r) => s + r.item_count, 0)}</td>
-                            <td style={{ textAlign: 'right', fontFamily: 'IBM Plex Mono' }}>{total.toLocaleString()}</td>
-                            <td />
-                        </tr>
-                    </tfoot>
-                )}
-            </table>
+  // Split into monthly vs special
+  const MONTHLY_CHARGES = [
+    'Monthly Contribution', 'Base Contribution',
+    'Mosque Contribution', 'Mosque Fund',
+    'Garbage Collection', 'Garbage Charges',
+    'Aquifer Contribution', 'Aquifer Charges',
+    'Monthly Tenant Challan',
+  ]
+  const monthly = data.filter(r =>
+    r.bill_type === 'monthly' || r.bill_type === 'tenant' ||
+    MONTHLY_CHARGES.includes(r.charge_name)
+  )
+  const special = data.filter(r =>
+    r.bill_type === 'special' &&
+    !MONTHLY_CHARGES.includes(r.charge_name)
+  )
+
+  const monthlyTotal  = monthly.reduce((s, r) => s + r.total_collected, 0)
+  const specialTotal  = special.reduce((s, r) => s + r.total_collected, 0)
+  const grandTotal    = monthlyTotal + specialTotal
+
+  const fmt = (n: number) => n.toLocaleString()
+
+  const SectionTable = ({ rows, sectionTotal }: { rows: any[]; sectionTotal: number }) => (
+    <table className="data-table" style={{ margin: 0 }}>
+      <thead>
+        <tr>
+          <th>Charge / Fund</th>
+          <th style={{ textAlign: 'right' }}>Collected (Rs.)</th>
+          <th style={{ textAlign: 'right' }}>Outstanding (Rs.)</th>
+          <th style={{ width: 160 }}>Share</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.length === 0 ? (
+          <tr><td colSpan={4} className="empty-row">No data for this period</td></tr>
+        ) : rows.map((r, i) => {
+          const pct = sectionTotal > 0 ? (r.total_collected / sectionTotal) * 100 : 0
+          return (
+            <tr key={i}>
+              <td style={{ fontWeight: 500 }}>{r.charge_name}</td>
+              <td style={{ textAlign: 'right', fontFamily: 'IBM Plex Mono',
+                fontWeight: 600, color: 'var(--c-paid)' }}>
+                {fmt(r.total_collected)}
+              </td>
+              <td style={{ textAlign: 'right', fontFamily: 'IBM Plex Mono',
+                color: r.total_outstanding > 0 ? 'var(--c-overdue)' : 'var(--t-faint)' }}>
+                {r.total_outstanding > 0 ? fmt(r.total_outstanding) : '—'}
+              </td>
+              <td>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <div style={{ flex: 1, height: 6, background: 'var(--bg-subtle)',
+                    borderRadius: 3, overflow: 'hidden' }}>
+                    <div style={{ width: `${pct}%`, height: '100%',
+                      background: 'var(--accent)', borderRadius: 3 }} />
+                  </div>
+                  <span style={{ fontSize: 11, fontFamily: 'IBM Plex Mono',
+                    color: 'var(--t-faint)', width: 36, textAlign: 'right' }}>
+                    {pct.toFixed(1)}%
+                  </span>
+                </div>
+              </td>
+            </tr>
+          )
+        })}
+      </tbody>
+      <tfoot>
+        <tr style={{ borderTop: '2px solid var(--border)', fontWeight: 700 }}>
+          <td>Total</td>
+          <td style={{ textAlign: 'right', fontFamily: 'IBM Plex Mono',
+            color: 'var(--c-paid)' }}>{fmt(sectionTotal)}</td>
+          <td style={{ textAlign: 'right', fontFamily: 'IBM Plex Mono',
+            color: 'var(--c-overdue)' }}>
+            {fmt(rows.reduce((s, r) => s + r.total_outstanding, 0))}
+          </td>
+          <td />
+        </tr>
+      </tfoot>
+    </table>
+  )
+
+  return (
+    <div>
+      {/* ── Filter bar ── */}
+      <div style={{ display: 'flex', gap: '1rem', alignItems: 'center',
+        marginBottom: '1.5rem', flexWrap: 'wrap' }}>
+        <input type="month" value={startMonth}
+          onChange={e => setStartMonth(e.target.value)} />
+        <span style={{ color: 'var(--t-faint)' }}>to</span>
+        <input type="month" value={endMonth}
+          onChange={e => setEndMonth(e.target.value)} />
+        <button className="btn btn-ghost" onClick={load} disabled={loading}>
+          {loading ? <><RefreshCw size={14} className="spin"/> Loading…</> : 'Load'}
+        </button>
+        <button className="btn btn-ghost" style={{ marginLeft: 'auto' }}
+          onClick={() => exportTableExcel('fund-summary', 'Fund Summary', data,
+            ['Charge', 'Type', 'Collected', 'Outstanding'])}>
+          <Download size={16} /> Export Excel
+        </button>
+      </div>
+
+      {/* ── Grand total strip ── */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)',
+        gap: '1rem', marginBottom: '1.75rem' }}>
+        {[
+          { label: 'MONTHLY COLLECTED',  val: fmt(monthlyTotal), clr: 'var(--c-paid)'    },
+          { label: 'SPECIAL COLLECTED',  val: fmt(specialTotal), clr: 'var(--accent)'    },
+          { label: 'GRAND TOTAL',        val: fmt(grandTotal),   clr: 'var(--t-primary)' },
+        ].map(k => (
+          <div key={k.label} style={{ background: 'var(--bg-card)',
+            border: '1px solid var(--border)', borderRadius: 'var(--r-lg)',
+            padding: '1.1rem 1.4rem' }}>
+            <div style={{ fontSize: '0.7rem', fontWeight: 700, color: 'var(--t-faint)',
+              letterSpacing: '0.08em', textTransform: 'uppercase',
+              marginBottom: '0.4rem' }}>{k.label}</div>
+            <div style={{ fontSize: '1.15rem', fontWeight: 700,
+              fontFamily: 'IBM Plex Mono', color: k.clr }}>Rs. {k.val}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* ── Section 1: Monthly ── */}
+      <div style={{ marginBottom: '2rem' }}>
+        <div style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--accent)',
+          letterSpacing: '0.08em', textTransform: 'uppercase',
+          fontFamily: 'IBM Plex Mono', marginBottom: '0.75rem',
+          borderBottom: '2px solid var(--accent)', paddingBottom: 4 }}>
+          Monthly Collections
         </div>
-    )
+        <SectionTable rows={monthly} sectionTotal={monthlyTotal} />
+      </div>
+
+      {/* ── Section 2: Special ── */}
+      <div>
+        <div style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--t-muted)',
+          letterSpacing: '0.08em', textTransform: 'uppercase',
+          fontFamily: 'IBM Plex Mono', marginBottom: '0.75rem',
+          borderBottom: '2px solid var(--border)', paddingBottom: 4 }}>
+          Special Charges
+        </div>
+        <SectionTable rows={special} sectionTotal={specialTotal} />
+      </div>
+    </div>
+  )
 }
 
 // ── Balance Sheet ─────────────────────────────────────────────
@@ -536,8 +635,8 @@ function BalanceSheetReport() {
                     {balanced ? '✓ Balanced' : `Out of balance by Rs. ${fmt(Math.abs(totalAssets - totalLiabilities - totalEquity))}`}
                 </div>
                 <button className="btn btn-ghost" style={{ marginLeft: 'auto' }}
-                    onClick={() => exportTableCSV('balance-sheet', data, ['Code', 'Account', 'Type', 'Balance'])}>
-                    <Download size={16} /> Export CSV
+                    onClick={() => exportTableExcel('balance-sheet', 'Balance Sheet', data, ['Code', 'Account', 'Type', 'Balance'])}>
+                    <Download size={16} /> Export Excel
                 </button>
             </div>
 
@@ -588,15 +687,22 @@ function BalanceSheetReport() {
 
 // ── CSV Export Utility ────────────────────────────────────────
 
-function exportTableCSV(name: string, data: any[], _headers: string[]) {
+async function exportTableExcel(name: string, title: string, data: any[], _headers: string[]) {
     if (data.length === 0) return
     const keys = Object.keys(data[0])
-    const csv = [keys.join(','), ...data.map(row => keys.map(k => `"${row[k] ?? ''}"`).join(','))].join('\n')
-    const blob = new Blob([csv], { type: 'text/csv' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `${name}_${new Date().toISOString().split('T')[0]}.csv`
-    a.click()
-    URL.revokeObjectURL(url)
+    const numericColumns = keys
+        .map((key, index) => ({ key, index: index + 1 }))
+        .filter(({ key }) => data.some(row => typeof row[key] === 'number'))
+        .map(({ index }) => index)
+
+    await exportExcelFile({
+        fileName: `${name}_${new Date().toISOString().split('T')[0]}`,
+        sheetName: title,
+        title: 'River View Cooperative Housing Society Ltd.',
+        subtitle: title,
+        meta: [`Generated: ${new Date().toLocaleDateString('en-PK')} | Records: ${data.length}`],
+        headers: keys.map(key => key.replace(/_/g, ' ').replace(/\b\w/g, char => char.toUpperCase())),
+        rows: data.map(row => keys.map(key => row[key] ?? '')),
+        numericColumns,
+    })
 }

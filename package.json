@@ -49,6 +49,7 @@
   },
   "dependencies": {
     "better-sqlite3": "^12.6.2",
+    "exceljs": "^4.4.0",
     "jspdf": "^4.2.0",
     "jspdf-autotable": "^5.0.7",
     "lucide-react": "^0.575.0",

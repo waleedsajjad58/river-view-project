@@ -1,8 +1,95 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Plus, X, Search, Landmark, Trash2, Printer } from 'lucide-react'
+import { Plus, X, Search, Landmark, Trash2, Printer, FileDown, RefreshCw } from 'lucide-react'
+import { exportExcelFile } from '../utils/exportExcel'
 
 const ipc = (window as any).ipcRenderer
 const fmt = (n: any) => (Number(n) || 0).toLocaleString()
+
+function printBankDepositsReport(rows: any[], startDate: string, endDate: string) {
+    const totalAmount = rows.reduce((s, d) => s + (Number(d.amount) || 0), 0)
+    const bodyRows = rows.map((d: any) => `
+        <tr>
+            <td>${d.deposit_date || ''}</td>
+            <td>${d.bank_name || ''}</td>
+            <td>${d.account_number || '—'}</td>
+            <td>${d.description || '—'}</td>
+            <td>${d.reference_number || '—'}</td>
+            <td>${d.deposited_by || '—'}</td>
+            <td class="num">${fmt(d.amount)}</td>
+        </tr>
+    `).join('')
+
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Bank Deposits</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: Arial, sans-serif; font-size: 11px; color: #111; padding: 16px; }
+        h2 { font-size: 15px; text-align: center; margin-bottom: 2px; color: #1a2e5a; }
+        .sub { text-align: center; font-size: 10px; color: #555; margin-bottom: 10px; }
+        .meta { display: flex; justify-content: space-between; font-size: 10px; color: #666; margin-bottom: 10px; padding: 4px 0; border-bottom: 1px solid #ddd; }
+        table { width: 100%; border-collapse: collapse; }
+        thead th {
+            background: #1a4a7a; color: #fff; padding: 5px 7px;
+            font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
+            border: 1px solid #0e3060;
+        }
+        tbody td { border-bottom: 1px dotted #d8e0ec; padding: 4px 7px; font-size: 10.5px; }
+        td.num { text-align: right; font-family: 'Courier New', monospace; color: #1d4ed8; }
+        tfoot td { background: #1a4a7a; color: #fff; font-weight: 700; padding: 6px 7px; border-top: 2px solid #0e3060; }
+        .numf { text-align: right; font-family: 'Courier New', monospace; }
+        @media print { body { padding: 0; } }
+    </style>
+    </head><body>
+    <h2>River View Cooperative Housing Society Ltd.</h2>
+    <div class="sub">Bank Deposits - ${startDate} to ${endDate}</div>
+    <div class="meta"><span>${rows.length} deposits</span><span>Printed: ${new Date().toLocaleDateString('en-PK')}</span></div>
+    <table>
+      <thead><tr>
+        <th style="width:88px">Date</th>
+        <th style="width:120px">Bank</th>
+        <th style="width:115px">Account #</th>
+        <th>Description</th>
+        <th style="width:95px">Ref / Slip #</th>
+        <th style="width:95px">Deposited By</th>
+        <th style="width:95px">Amount (Rs.)</th>
+      </tr></thead>
+      <tbody>${bodyRows}</tbody>
+      <tfoot><tr>
+        <td colspan="6" style="letter-spacing:0.05em;font-size:10px;">TOTAL DEPOSITED</td>
+        <td class="numf">${fmt(totalAmount)}</td>
+      </tr></tfoot>
+    </table>
+    <script>window.onload = () => { window.print(); }<\/script>
+    </body></html>`
+
+    if (ipc) ipc.invoke('db:print-html-report', html)
+}
+
+async function exportBankDepositsExcel(rows: any[], startDate: string, endDate: string) {
+    const totalAmount = rows.reduce((s, d) => s + (Number(d.amount) || 0), 0)
+    const dataRows: (string | number)[][] = rows.map((d: any) => ([
+        d.deposit_date || '',
+        d.bank_name || '',
+        d.account_number || '',
+        d.description || '',
+        d.reference_number || '',
+        d.deposited_by || '',
+        Number(d.amount) || 0,
+    ]))
+
+    dataRows.push([])
+    dataRows.push(['', '', '', '', '', 'TOTAL DEPOSITED', totalAmount])
+
+    await exportExcelFile({
+        fileName: `bank-deposits-${startDate}-to-${endDate}`,
+        sheetName: 'Bank Deposits',
+        title: 'River View Cooperative Housing Society Ltd.',
+        subtitle: `Bank Deposits - ${startDate} to ${endDate}`,
+        meta: [`Generated: ${new Date().toLocaleDateString('en-PK')} | Deposits: ${rows.length}`],
+        headers: ['Date', 'Bank', 'Account Number', 'Description', 'Reference Number', 'Deposited By', 'Amount (Rs.)'],
+        rows: dataRows,
+        numericColumns: [7],
+    })
+}
 
 function printDepositSlip(d: any) {
     const html = `<!DOCTYPE html><html><head><meta charset="utf-8">
@@ -246,6 +333,16 @@ export default function BankDepositsPage() {
                 <div className="header-actions">
                     <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} />
                     <input type="date" value={endDate}   onChange={e => setEndDate(e.target.value)} />
+                    {filtered.length > 0 && (
+                        <>
+                        <button className="btn btn-ghost" onClick={() => exportBankDepositsExcel(filtered, startDate, endDate)}>
+                            <FileDown size={15} /> Export Excel
+                        </button>
+                        <button className="btn btn-ghost" onClick={() => printBankDepositsReport(filtered, startDate, endDate)}>
+                            <Printer size={15} /> Print
+                        </button>
+                        </>
+                    )}
                     <button className="btn btn-primary" onClick={() => setShowAdd(true)}>
                         <Plus size={15} /> Record Deposit
                     </button>

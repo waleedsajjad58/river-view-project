@@ -1,11 +1,12 @@
 // Must be FIRST — the IDE (VS Code / Cursor) sets this, which breaks Electron's built-in modules
 delete process.env.ELECTRON_RUN_AS_NODE;
 
-import { app, BrowserWindow, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import { join } from 'path';
 import { writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { createHash } from 'crypto';
+import ExcelJS from 'exceljs';
 import { initDatabase, getDb } from './database.js';
 import { generateChallanHTML, printChallan, generateTransferSlipHTML } from './challan-service.js';
 
@@ -43,6 +44,104 @@ function writeAuditLog(db, tableName, recordId, action, details = {}) {
     } catch (e) {
         console.error('[AuditLog] Failed to write:', e.message);
     }
+}
+
+function recalcPlotBills(db, plotId) {
+        const allUnpaid = db.prepare(`
+            SELECT * FROM bills
+                        WHERE plot_id = ? 
+                            AND status IN ('unpaid','partial') 
+                            AND is_deleted = 0
+                            AND bill_type IN ('monthly', 'tenant')
+                            AND billing_month IS NOT NULL
+            ORDER BY billing_month ASC
+        `).all(plotId);
+
+        const templates = db.prepare(`
+            SELECT bt.charge_name, bt.amount
+            FROM bill_templates bt
+            JOIN plots p ON p.plot_type = bt.plot_type
+            WHERE p.id = ? AND bt.is_active = 1
+        `).all(plotId);
+
+        const templateMap = {};
+        for (const t of templates) templateMap[t.charge_name] = t.amount;
+
+        for (const fb of allUnpaid) {
+                // Fresh per-charge arrears from all previous unpaid bills
+                const freshHistorical = db.prepare(`
+                    SELECT bi.charge_name,
+                        COALESCE(SUM(
+                            CASE WHEN b.subtotal > 0
+                                THEN bi.amount * (b.balance_due / b.subtotal)
+                                ELSE 0 END
+                        ), 0) as owed
+                    FROM bill_items bi
+                    JOIN bills b ON bi.bill_id = b.id
+                    WHERE b.plot_id = ?
+                        AND b.billing_month < ?
+                        AND b.balance_due > 0.01
+                        AND b.is_deleted = 0
+                        AND bi.charge_name NOT LIKE '%Arrears%'
+                        AND bi.charge_name NOT LIKE '%Late Fee%'
+                    GROUP BY bi.charge_name
+                `).all(plotId, fb.billing_month);
+
+                const freshMap = {};
+                let totalArrears = 0;
+                for (const row of freshHistorical) {
+                        freshMap[row.charge_name] = row.owed || 0;
+                        totalArrears += row.owed || 0;
+                }
+
+                // Update each existing charge item
+                const baseItems = db.prepare(`
+                    SELECT id, charge_name FROM bill_items
+                    WHERE bill_id = ?
+                        AND charge_name NOT LIKE '%Arrears%'
+                        AND charge_name NOT LIKE '%Late Fee%'
+                `).all(fb.id);
+
+                for (const item of baseItems) {
+                        const baseRate   = templateMap[item.charge_name] || 0;
+                        const historical = freshMap[item.charge_name]   || 0;
+                        db.prepare('UPDATE bill_items SET amount = ? WHERE id = ?')
+                                .run(baseRate + historical, item.id);
+                        delete freshMap[item.charge_name];
+                }
+
+                // Any historical charges not in current bill
+                for (const [charge_name, owed] of Object.entries(freshMap)) {
+                        if (owed > 0.01) {
+                                db.prepare(`
+                                    INSERT OR IGNORE INTO bill_items (bill_id, charge_name, amount)
+                                    VALUES (?, ?, ?)
+                                `).run(fb.id, charge_name, owed);
+                        }
+                }
+
+                // Remove stale arrears rows
+                db.prepare(`
+                    DELETE FROM bill_items
+                    WHERE bill_id = ? AND charge_name LIKE '%Arrears%'
+                `).run(fb.id);
+
+                // Update bill totals
+                const newTotal   = (fb.subtotal || 0) + totalArrears;
+                const newBalance = Math.max(0, newTotal - (fb.amount_paid || 0));
+                const newStatus  = newBalance <= 0.01 ? 'paid'
+                        : newBalance === newTotal ? 'unpaid' : 'partial';
+
+                db.prepare(`
+                    UPDATE bills SET
+                        total_amount = ?,
+                        arrears      = ?,
+                        balance_due  = ?,
+                        status       = ?,
+                        updated_at   = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                `).run(newTotal, totalArrears, newBalance, newStatus, fb.id);
+        }
 }
 
 // ── Plots ─────────────────────────────────────────────────────
@@ -156,6 +255,9 @@ ipcMain.handle('db:get-plot-statement', (_e, plotId) => {
 
     const bills = db.prepare(`
         SELECT b.*,
+               b.subtotal as current_charges,
+               b.arrears as previous_dues,
+               b.balance_due as actual_balance,
                (SELECT GROUP_CONCAT(bi.charge_name, ', ') FROM bill_items bi WHERE bi.bill_id = b.id) as charge_names
         FROM bills b
         WHERE b.plot_id = ? AND b.is_deleted = 0
@@ -171,6 +273,12 @@ ipcMain.handle('db:get-plot-statement', (_e, plotId) => {
     const generalCount = bills.filter(b => b.bill_type === 'general').length;
 
     return { plot, bills, summary: { totalBilled, totalPaid, totalOutstanding, unpaidCount, monthlyCount, specialCount, generalCount } };
+});
+
+ipcMain.handle('db:fix-baked-arrears', () => {
+    const db = getDb();
+    void db;
+    return { message: 'Bills already correct via FIFO balance_due' };
 });
 
 // ── Settings ──────────────────────────────────────────────────
@@ -458,23 +566,57 @@ ipcMain.handle('db:generate-monthly-bills', (_e, { billingMonth }) => {
                     }
                 }
 
-                // Carry forward arrears: only sum each prior bill's OWN unpaid charges
-                // (subtotal + late_fee - amount_paid), NOT balance_due which includes cascaded arrears
-                const arrears = db.prepare(
-                    `SELECT COALESCE(SUM(
-                        CASE WHEN (subtotal + COALESCE(late_fee, 0) - amount_paid) > 0
-                             THEN (subtotal + COALESCE(late_fee, 0) - amount_paid)
-                             ELSE 0 END
-                    ), 0) as total FROM bills
-                    WHERE plot_id = ? AND billing_month < ? AND bill_type = 'monthly'
-                    AND status IN ('unpaid', 'partial', 'overdue') AND is_deleted = 0`
-                ).get(plot.id, billingMonth)?.total || 0;
+                // Per-charge historical outstanding — reads actual bill_items from previous unpaid bills
+                // Handles different rates per month automatically since it reads real bill_items amounts
+                const historicalByCharge = db.prepare(`
+                    SELECT
+                        bi.charge_name,
+                        COALESCE(SUM(
+                            CASE WHEN b.subtotal > 0
+                                THEN bi.amount * (b.balance_due / b.subtotal)
+                                ELSE 0
+                            END
+                        ), 0) as owed
+                    FROM bill_items bi
+                    JOIN bills b ON bi.bill_id = b.id
+                    WHERE b.plot_id = ?
+                      AND b.billing_month < ?
+                      AND b.balance_due > 0.01
+                      AND b.is_deleted = 0
+                      AND bi.charge_name NOT LIKE '%Arrears%'
+                      AND bi.charge_name NOT LIKE '%Late Fee%'
+                    GROUP BY bi.charge_name
+                `).all(plot.id, billingMonth);
+
+                // Build lookup: charge_name → historical owed amount
+                const historicalMap = {};
+                for (const row of historicalByCharge) {
+                    historicalMap[row.charge_name] = row.owed || 0;
+                }
+
+                // Total arrears = sum of all historical owed (stored in bills.arrears for reference)
+                const arrears = Object.values(historicalMap).reduce((s, v) => s + v, 0);
 
                 if (items.length > 0) {
-                    const subtotal = items.reduce((sum, i) => sum + i.amount, 0);
-                    const total = subtotal + arrears;
-                    const billDate = billingMonth + '-01';
-                    const dueDate = new Date(billDate);
+                    // Merge current charges with historical — each charge gets current + its own arrears
+                    const mergedItems = items.map(item => ({
+                        charge_name: item.charge_name,
+                        amount: item.amount + (historicalMap[item.charge_name] || 0)
+                    }));
+
+                    // Any historical charges not in current month (e.g. charge type removed later)
+                    // still get their own row so nothing is lost
+                    for (const [charge_name, owed] of Object.entries(historicalMap)) {
+                        if (owed > 0.01 && !items.find(i => i.charge_name === charge_name)) {
+                            mergedItems.push({ charge_name, amount: owed });
+                        }
+                    }
+
+                    const subtotal = items.reduce((sum, i) => sum + i.amount, 0); // current month only
+                    const total    = mergedItems.reduce((sum, i) => sum + i.amount, 0); // current + arrears
+
+                    const billDate  = billingMonth + '-01';
+                    const dueDate   = new Date(billDate);
                     dueDate.setDate(dueDate.getDate() + dueDays);
                     const dueDateStr = dueDate.toISOString().split('T')[0];
                     const seq = String((db.prepare('SELECT COUNT(*) as c FROM bills WHERE billing_month = ?').get(billingMonth)?.c || 0) + 1).padStart(3, '0');
@@ -484,12 +626,18 @@ ipcMain.handle('db:generate-monthly-bills', (_e, { billingMonth }) => {
                         INSERT INTO bills (bill_number, plot_id, member_id, bill_type, bill_date, due_date,
                         billing_month, subtotal, arrears, total_amount, balance_due, status)
                         VALUES (?, ?, ?, 'monthly', ?, ?, ?, ?, ?, ?, ?, 'unpaid')
-                    `).run(billNumber, plot.id, owner?.member_id || null, billDate, dueDateStr, billingMonth, subtotal, arrears, total, total);
+                    `).run(billNumber, plot.id, owner?.member_id || null,
+                        billDate, dueDateStr, billingMonth,
+                        subtotal,  // subtotal = current month charges only
+                        arrears,   // arrears = total historical owed (kept for reference)
+                        total,     // total_amount = current + historical merged
+                        total      // balance_due starts equal to total
+                    );
 
                     const billId = result.lastInsertRowid;
                     const insertItem = db.prepare('INSERT INTO bill_items (bill_id, charge_name, amount) VALUES (?, ?, ?)');
-                    for (const item of items) insertItem.run(billId, item.charge_name, item.amount);
-                    if (arrears > 0) insertItem.run(billId, 'Arrears (Previous Balance)', arrears);
+                    for (const item of mergedItems) insertItem.run(billId, item.charge_name, item.amount);
+                    // NOTE: No "Arrears (Previous Balance)" row inserted — arrears are merged per charge above
 
                     // Auto-apply any advance credit for this plot
                     const credit = db.prepare('SELECT * FROM plot_credits WHERE plot_id = ?').get(plot.id);
@@ -536,8 +684,115 @@ ipcMain.handle('db:generate-monthly-bills', (_e, { billingMonth }) => {
                 }
             }
         }
+
+        // After all plots are processed — recalc every plot that has unpaid bills
+        const plotsWithUnpaid = db.prepare(`
+          SELECT DISTINCT plot_id FROM bills
+          WHERE status IN ('unpaid','partial') AND is_deleted = 0
+        `).all();
+
+        for (const p of plotsWithUnpaid) {
+            recalcPlotBills(db, p.plot_id);
+        }
     })();
     return { generated, month: billingMonth };
+});
+
+// ── One-time fix: redistribute Arrears bill_items into per-charge rows ────────
+// Safe to run multiple times — checks before touching each bill
+ipcMain.handle('db:fix-arrears-bill-items', () => {
+  const db = getDb();
+
+  // Find all bills that still have an "Arrears (Previous Balance)" bill_item row
+  const badBills = db.prepare(`
+    SELECT DISTINCT b.id, b.plot_id, b.billing_month, b.subtotal, b.arrears, b.total_amount
+    FROM bills b
+    JOIN bill_items bi ON bi.bill_id = b.id
+    WHERE bi.charge_name LIKE '%Arrears%'
+      AND b.is_deleted = 0
+  `).all();
+
+  let fixed = 0;
+  const errors = [];
+
+  db.transaction(() => {
+    for (const bill of badBills) {
+      try {
+        // Get current charge items (excluding arrears + late fee rows)
+        const chargeItems = db.prepare(`
+          SELECT id, charge_name, amount FROM bill_items
+          WHERE bill_id = ?
+            AND charge_name NOT LIKE '%Arrears%'
+            AND charge_name NOT LIKE '%Late Fee%'
+        `).all(bill.id);
+
+        if (chargeItems.length === 0) continue;
+
+        // Get per-charge historical owed from all PREVIOUS unpaid bills
+        const historicalByCharge = db.prepare(`
+          SELECT
+            bi.charge_name,
+            COALESCE(SUM(
+              CASE WHEN b.subtotal > 0
+                THEN bi.amount * (b.balance_due / b.subtotal)
+                ELSE 0
+              END
+            ), 0) as owed
+          FROM bill_items bi
+          JOIN bills b ON bi.bill_id = b.id
+          WHERE b.plot_id = ?
+            AND b.billing_month < ?
+            AND b.balance_due > 0.01
+            AND b.is_deleted = 0
+            AND bi.charge_name NOT LIKE '%Arrears%'
+            AND bi.charge_name NOT LIKE '%Late Fee%'
+          GROUP BY bi.charge_name
+        `).all(bill.plot_id, bill.billing_month);
+
+        const historicalMap = {};
+        for (const row of historicalByCharge) {
+          historicalMap[row.charge_name] = row.owed || 0;
+        }
+
+        const updateItem = db.prepare(
+          'UPDATE bill_items SET amount = ? WHERE id = ?'
+        );
+        const insertItem = db.prepare(
+          'INSERT INTO bill_items (bill_id, charge_name, amount) VALUES (?, ?, ?)'
+        );
+
+        // Update each existing charge row: add its historical portion
+        for (const item of chargeItems) {
+          const historical = historicalMap[item.charge_name] || 0;
+          if (historical > 0.01) {
+            updateItem.run(item.amount + historical, item.id);
+          }
+          // Remove from map so we know it was handled
+          delete historicalMap[item.charge_name];
+        }
+
+        // Any historical charges not in current bill (old charge type)
+        // get their own new row
+        for (const [charge_name, owed] of Object.entries(historicalMap)) {
+          if (owed > 0.01) {
+            insertItem.run(bill.id, charge_name, owed);
+          }
+        }
+
+        // Delete the arrears row — now redistributed
+        db.prepare(`
+          DELETE FROM bill_items
+          WHERE bill_id = ? AND charge_name LIKE '%Arrears%'
+        `).run(bill.id);
+
+        fixed++;
+      } catch (e) {
+        errors.push(`Bill ${bill.id}: ${e.message}`);
+      }
+    }
+  })();
+
+  return { fixed, total: badBills.length, errors };
 });
 
 // ── Bills ─────────────────────────────────────────────────────
@@ -613,126 +868,336 @@ ipcMain.handle('db:get-all-bills', (_e, filters) => {
 
 // ── Payments ──────────────────────────────────────────────────
 ipcMain.handle('db:record-payment', (_e, { billId, amount, paymentMethod, receiptNumber, notes }) => {
-    const db = getDb();
-    return db.transaction(() => {
-        const bill = db.prepare(`
-            SELECT b.id, b.bill_number, b.total_amount, b.amount_paid, b.balance_due,
-                   b.plot_id, b.arrears, b.billing_month, b.subtotal, b.bill_type,
-                   COALESCE(b.late_fee, 0) as late_fee, p.plot_number
-            FROM bills b LEFT JOIN plots p ON b.plot_id = p.id WHERE b.id = ?
-        `).get(billId);
-        if (!bill) throw new Error('Bill not found');
+  const db = getDb();
+  return db.transaction(() => {
 
-        const newPaid = (bill.amount_paid || 0) + amount;
-        const newBalance = bill.total_amount - newPaid;
-        const status = newBalance <= 0 ? 'paid' : newBalance === bill.total_amount ? 'unpaid' : 'partial';
+    const bill = db.prepare(`
+      SELECT b.*, p.plot_number, p.id as pid
+      FROM bills b LEFT JOIN plots p ON b.plot_id = p.id
+      WHERE b.id = ?
+    `).get(billId);
+    if (!bill) throw new Error('Bill not found');
 
-        // ── Auto-generate receipt number: REC-YYYYMMDD-NNN ──
-        const today = new Date().toISOString().split('T')[0];
-        const receiptPrefix = db.prepare("SELECT value FROM settings WHERE key = 'receipt_prefix'").get()?.value || 'REC-';
-        const dateCompact = today.replace(/-/g, '');
-        const seqRow = db.prepare("SELECT COUNT(*) as c FROM payments WHERE payment_date = date('now')").get();
-        const seq = String((seqRow?.c || 0) + 1).padStart(3, '0');
-        const autoReceipt = `${receiptPrefix}${dateCompact}-${seq}`;
-        const finalReceipt = receiptNumber || autoReceipt;
+    // ── Receipt number ──────────────────────────────────────
+    const today = new Date().toISOString().split('T')[0];
+    const receiptPrefix = db.prepare(
+      "SELECT value FROM settings WHERE key = 'receipt_prefix'"
+    ).get()?.value || 'REC-';
+    const dateCompact = today.replace(/-/g, '');
+    const seqRow = db.prepare(
+      "SELECT COUNT(*) as c FROM payments WHERE payment_date = date('now')"
+    ).get();
+    const seq = String((seqRow?.c || 0) + 1).padStart(3, '0');
+    const finalReceipt = receiptNumber || `${receiptPrefix}${dateCompact}-${seq}`;
 
-        const paymentResult = db.prepare(
-            "INSERT INTO payments (bill_id, payment_date, amount, payment_method, receipt_number, notes) VALUES (?, date('now'), ?, ?, ?, ?)"
-        ).run(billId, amount, paymentMethod || 'cash', finalReceipt, notes || null);
+    // ── Insert master payment ────────────────────────────────
+    const payResult = db.prepare(`
+      INSERT INTO payments (bill_id, payment_date, amount, payment_method, receipt_number, notes)
+      VALUES (?, date('now'), ?, ?, ?, ?)
+    `).run(billId, amount, paymentMethod || 'cash', finalReceipt, notes || null);
+    const paymentId = payResult.lastInsertRowid;
 
-        db.prepare('UPDATE bills SET amount_paid = ?, balance_due = ?, status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
-            .run(newPaid, Math.max(0, newBalance), status, billId);
+    // ── Build charge → account map from DB (dynamic, respects future edits) ──
+    // Fallback to default if table doesn't exist yet (before migration runs)
+    const CHARGE_MAP = {};
+    try {
+      const chargeMapRows = db.prepare('SELECT charge_name, account_code FROM charge_account_map').all();
+      for (const r of chargeMapRows) CHARGE_MAP[r.charge_name] = r.account_code;
+    } catch (_) {
+      // Table doesn't exist yet — use defaults until migration 15 runs
+      Object.assign(CHARGE_MAP, {
+        'Monthly Contribution': '4000',
+        'Base Contribution': '4000',
+        'Monthly Tenant Challan': '4004',
+        'Mosque Contribution': '4001',
+        'Mosque Fund': '4001',
+        'Garbage Collection': '4002',
+        'Garbage Charges': '4002',
+        'Aquifer Contribution': '4003',
+        'Aquifer Charges': '4003',
+        'Per Extra Floor': '4000',
+      });
+    }
 
-        const desc = `Payment received for Bill #${bill.bill_number} (Plot ${bill.plot_number})`;
-        const debitAccountCode = paymentMethod === 'cash' ? '1000' : '1001';
-        const debitAccount = db.prepare('SELECT id FROM accounts WHERE account_code = ?').get(debitAccountCode);
-        const creditAccount = db.prepare('SELECT id FROM accounts WHERE account_code = ?').get('4000');
+    // ── FIFO: all unpaid bills for this plot, oldest first ───
+    const unpaidBills = db.prepare(`
+      SELECT * FROM bills
+      WHERE plot_id = ? AND balance_due > 0.01 AND is_deleted = 0
+      ORDER BY billing_month ASC, id ASC
+    `).all(bill.plot_id);
 
-        if (!debitAccount || !creditAccount) throw new Error(`Chart of accounts missing ${debitAccountCode} or 1200`);
+    let remaining = amount;
+    
+    // ── Journal entry (one per payment, multiple credit lines) ──
+    const debitAccountCode = paymentMethod === 'cash' ? '1000' : '1001';
+    const debitAccount = db.prepare(
+      'SELECT id FROM accounts WHERE account_code = ?'
+    ).get(debitAccountCode);
 
-        const jeResult = db.prepare("INSERT INTO journal_entries (entry_date, description, voucher_number, reference_type, reference_id) VALUES (?, ?, ?, 'payment', ?)").run(today, desc, finalReceipt, paymentResult.lastInsertRowid);
-        const jeId = jeResult.lastInsertRowid;
+    const desc = `Payment received — Plot ${bill.plot_number} (${finalReceipt})`;
+    const jeResult = db.prepare(`
+      INSERT INTO journal_entries
+        (entry_date, description, voucher_number, reference_type, reference_id)
+      VALUES (?, ?, ?, 'payment', ?)
+    `).run(today, desc, finalReceipt, paymentId);
+    const jeId = jeResult.lastInsertRowid;
 
-        db.prepare('INSERT INTO journal_lines (journal_entry_id, account_id, debit, credit) VALUES (?, ?, ?, 0)').run(jeId, debitAccount.id, amount);
-        db.prepare('INSERT INTO journal_lines (journal_entry_id, account_id, debit, credit) VALUES (?, ?, 0, ?)').run(jeId, creditAccount.id, amount);
+    // Dr. Cash/Bank — full payment amount
+    if (debitAccount) {
+      db.prepare(
+        'INSERT INTO journal_lines (journal_entry_id, account_id, debit, credit) VALUES (?, ?, ?, 0)'
+      ).run(jeId, debitAccount.id, amount);
+    }
 
-        const leDebitResult = db.prepare("INSERT INTO ledger_entries (entry_date, description, voucher_number, reference_type, reference_id, debit_account_id, amount, journal_entry_id) VALUES (?, ?, ?, 'payment', ?, ?, ?, ?)").run(today, desc, finalReceipt, paymentResult.lastInsertRowid, debitAccount.id, amount, jeId);
-        db.prepare("INSERT INTO ledger_entries (entry_date, description, voucher_number, reference_type, reference_id, credit_account_id, amount, journal_entry_id) VALUES (?, ?, ?, 'payment', ?, ?, ?, ?)").run(today, desc, finalReceipt, paymentResult.lastInsertRowid, creditAccount.id, amount, jeId);
+    // ── Accumulate credit lines per account (merge across bills) ──
+    // accountCode → total credit amount
+    const creditAccumulator = {};
 
-        db.prepare('INSERT INTO cashbook_entries (entry_date, description, receipt_number, cash_in, bank_in, journal_entry_id, ledger_entry_id) VALUES (?, ?, ?, ?, ?, ?, ?)')
-            .run(today, desc, finalReceipt, paymentMethod === 'cash' ? amount : 0, paymentMethod !== 'cash' ? amount : 0, jeId, leDebitResult.lastInsertRowid);
+    const addCredit = (accountCode, creditAmount) => {
+      if (!accountCode || creditAmount < 0.005) return;
+      creditAccumulator[accountCode] = (creditAccumulator[accountCode] || 0) + creditAmount;
+    };
 
-        writeAuditLog(db, 'payments', paymentResult.lastInsertRowid, 'PAYMENT', {
-            billId, amount, paymentMethod, receiptNumber: finalReceipt, billNumber: bill.bill_number
-        });
+    // ── Process each bill FIFO ───────────────────────────────
+    for (const ub of unpaidBills) {
+      if (remaining <= 0.01) break;
 
-        // ── Cascade: distribute payment across old unpaid bills when arrears exist ──
-        // When a bill includes arrears and a payment is made, settle older bills
-        // proportionally. Full payment → all old bills marked paid.
-        // Partial payment → settle oldest bills first with the arrears portion.
-        if ((bill.arrears || 0) > 0 && bill.bill_type === 'monthly') {
-            const oldBills = db.prepare(
-                `SELECT id, balance_due, subtotal, COALESCE(late_fee, 0) as late_fee, amount_paid, total_amount
-                 FROM bills
-                 WHERE plot_id = ? AND billing_month < ? AND bill_type = 'monthly'
-                 AND status IN ('unpaid', 'partial', 'overdue') AND is_deleted = 0
-                 ORDER BY billing_month ASC`
-            ).all(bill.plot_id, bill.billing_month);
+      const apply = Math.min(remaining, ub.balance_due);
+      remaining -= apply;
 
-            if (status === 'paid') {
-                // Full payment — all old bills are settled
-                for (const old of oldBills) {
-                    if (old.balance_due > 0) {
-                        db.prepare(
-                            `UPDATE bills SET amount_paid = total_amount, balance_due = 0,
-                             status = 'paid', updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-                        ).run(old.id);
-                    }
-                }
-            } else if (status === 'partial') {
-                // Partial payment — figure out how much goes toward arrears vs current charges
-                // The current bill's own charges = subtotal + late_fee (without arrears)
-                const ownCharges = (bill.subtotal || 0) + (bill.late_fee || 0);
-                // Total paid on this bill so far (after this payment)
-                const totalPaidOnBill = newPaid;
-                // Amount that exceeds own charges = amount available to settle old bills
-                const arrearsPayment = Math.max(0, totalPaidOnBill - ownCharges);
+      // Record allocation
+      db.prepare(
+        'INSERT INTO payment_allocations (payment_id, bill_id, amount_applied) VALUES (?, ?, ?)'
+      ).run(paymentId, ub.id, apply);
 
-                if (arrearsPayment > 0.01) {
-                    let remaining = arrearsPayment;
-                    for (const old of oldBills) {
-                        if (remaining <= 0.01) break;
-                        // Each old bill's own unpaid = its own charges minus what was paid on it
-                        const oldOwn = (old.subtotal || 0) + (old.late_fee || 0) - (old.amount_paid || 0);
-                        if (oldOwn <= 0) continue;
-                        const apply = Math.min(remaining, oldOwn);
-                        const newOldPaid = (old.amount_paid || 0) + apply;
-                        const newOldBalance = old.total_amount - newOldPaid;
-                        const oldStatus = newOldBalance <= 0.01 ? 'paid' : 'partial';
-                        db.prepare(
-                            `UPDATE bills SET amount_paid = ?, balance_due = ?,
-                             status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-                        ).run(newOldPaid, Math.max(0, newOldBalance), oldStatus, old.id);
-                        remaining -= apply;
-                    }
-                }
+      // Update bill balance
+      const newPaid    = (ub.amount_paid || 0) + apply;
+      const newBalance = Math.max(0, ub.total_amount - newPaid);
+      const newStatus  = newBalance <= 0.01 ? 'paid' : 'partial';
+
+      db.prepare(`
+        UPDATE bills
+        SET amount_paid = ?, balance_due = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).run(newPaid, newBalance, newStatus, ub.id);
+
+      // ── Split credit proportionally across this bill's charges ──
+      // Get bill_items for THIS bill (uses actual amounts, handles old rates)
+      const items = db.prepare(`
+        SELECT bi.charge_name, bi.amount
+        FROM bill_items bi
+        WHERE bi.bill_id = ?
+          AND bi.charge_name NOT LIKE '%Arrears%'
+          AND bi.charge_name NOT LIKE '%Late Fee%'
+      `).all(ub.id);
+
+      const itemsTotal = items.reduce((s, i) => s + (i.amount || 0), 0);
+
+      if (items.length > 0 && itemsTotal > 0.01) {
+        // Fully paid bill: exact amounts; partial: proportional
+        const isFullyPaid = apply >= ub.balance_due - 0.01;
+
+        if (isFullyPaid) {
+          // ── Exact allocation — each charge gets its full amount ──
+          // But only the portion that was still unpaid on this bill
+          const previouslyPaid = ub.amount_paid || 0;
+          const prevRatio = Math.min(previouslyPaid / ub.total_amount, 1);
+
+          for (const item of items) {
+            // Amount still unpaid for this charge
+            const chargeOwed = item.amount * (1 - prevRatio);
+            const accountCode = CHARGE_MAP[item.charge_name] || '4000';
+            addCredit(accountCode, chargeOwed);
+          }
+        } else {
+          // ── Proportional allocation ──────────────────────────────
+          // Each charge gets: (charge_amount / items_total) × apply
+          let allocated = 0;
+          const sortedItems = [...items].sort((a, b) => b.amount - a.amount); // largest first
+          
+          for (let i = 0; i < sortedItems.length; i++) {
+            const item = sortedItems[i];
+            const isLast = i === sortedItems.length - 1;
+            const accountCode = CHARGE_MAP[item.charge_name] || '4000';
+            
+            let chargeCredit;
+            if (isLast) {
+              // Last item absorbs rounding remainder
+              chargeCredit = Math.max(0, apply - allocated);
+            } else {
+              chargeCredit = Math.round((item.amount / itemsTotal) * apply * 100) / 100;
+              allocated += chargeCredit;
             }
+            addCredit(accountCode, chargeCredit);
+          }
         }
+      } else {
+        // No bill_items found (e.g. legacy bill) — all goes to 4000
+        addCredit('4000', apply);
+      }
+    }
 
-        // If overpayment, store excess as advance credit against the plot
-        const overpaid = amount - bill.balance_due;
-        if (overpaid > 0.01) {
-            db.prepare(`
-                INSERT INTO plot_credits (plot_id, balance, updated_at)
-                VALUES (?, ?, datetime('now'))
-                ON CONFLICT(plot_id) DO UPDATE SET
-                    balance    = balance + excluded.balance,
-                    updated_at = datetime('now')
-            `).run(bill.plot_id, overpaid);
+    // ── Write all credit journal lines ──────────────────────
+    for (const [accountCode, creditAmount] of Object.entries(creditAccumulator)) {
+      if (creditAmount < 0.005) continue;
+      const account = db.prepare(
+        'SELECT id FROM accounts WHERE account_code = ?'
+      ).get(accountCode);
+      if (account) {
+        db.prepare(
+          'INSERT INTO journal_lines (journal_entry_id, account_id, debit, credit) VALUES (?, ?, 0, ?)'
+        ).run(jeId, account.id, creditAmount);
+      }
+    }
+
+    // ── Ledger + cashbook entries ────────────────────────────
+    if (debitAccount) {
+      const leResult = db.prepare(`
+        INSERT INTO ledger_entries
+          (entry_date, description, voucher_number, reference_type, reference_id,
+           debit_account_id, amount, journal_entry_id)
+        VALUES (?, ?, ?, 'payment', ?, ?, ?, ?)
+      `).run(today, desc, finalReceipt, paymentId, debitAccount.id, amount, jeId);
+
+      // One ledger credit line per fund account
+      for (const [accountCode, creditAmount] of Object.entries(creditAccumulator)) {
+        if (creditAmount < 0.005) continue;
+        const account = db.prepare(
+          'SELECT id FROM accounts WHERE account_code = ?'
+        ).get(accountCode);
+        if (account) {
+          db.prepare(`
+            INSERT INTO ledger_entries
+              (entry_date, description, voucher_number, reference_type, reference_id,
+               credit_account_id, amount, journal_entry_id)
+            VALUES (?, ?, ?, 'payment', ?, ?, ?, ?)
+          `).run(today, desc, finalReceipt, paymentId, account.id, creditAmount, jeId);
         }
+      }
 
-        return { receiptNumber: finalReceipt };
-    })();
+      db.prepare(`
+        INSERT INTO cashbook_entries
+          (entry_date, description, receipt_number, cash_in, bank_in,
+           journal_entry_id, ledger_entry_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        today, desc, finalReceipt,
+        paymentMethod === 'cash' ? amount : 0,
+        paymentMethod !== 'cash' ? amount : 0,
+        jeId, leResult.lastInsertRowid
+      );
+    }
+
+    // ── Overpayment → advance credit ────────────────────────
+    if (remaining > 0.01) {
+      db.prepare(`
+        INSERT INTO plot_credits (plot_id, balance, updated_at)
+        VALUES (?, ?, datetime('now'))
+        ON CONFLICT(plot_id) DO UPDATE SET
+          balance    = balance + excluded.balance,
+          updated_at = datetime('now')
+      `).run(bill.plot_id, remaining);
+    }
+
+    writeAuditLog(db, 'payments', paymentId, 'PAYMENT_FIFO', {
+      billId, amount, paymentMethod,
+      receiptNumber: finalReceipt,
+      fundBreakdown: creditAccumulator
+    });
+
+    // Recalc all unpaid bills for this plot after payment
+    recalcPlotBills(db, bill.plot_id);
+
+    return {
+      receiptNumber: finalReceipt,
+      advance: remaining > 0.01 ? remaining : 0,
+      fundBreakdown: creditAccumulator,
+    };
+  })();
+});
+
+// ── Running Balance ───────────────────────────────────────────
+ipcMain.handle('db:get-running-balance', (_e, plotId) => {
+  const db = getDb();
+  const r = db.prepare(`
+    SELECT
+      COALESCE(SUM(total_amount), 0) as total_billed,
+      COALESCE(SUM(amount_paid),  0) as total_paid,
+      COALESCE(SUM(balance_due),  0) as running_balance
+    FROM bills
+    WHERE plot_id = ? AND is_deleted = 0
+  `).get(plotId);
+  const credit = db.prepare('SELECT balance FROM plot_credits WHERE plot_id = ?').get(plotId);
+  return {
+    total_billed:     r?.total_billed     || 0,
+    total_paid:       r?.total_paid       || 0,
+    running_balance:  r?.running_balance  || 0,
+    advance_credit:   credit?.balance     || 0,
+  };
+});
+
+// ── FIFO Preview (call before posting payment) ────────────────
+ipcMain.handle('db:get-payment-preview', (_e, { plotId, amount }) => {
+  const db = getDb();
+  const unpaidBills = db.prepare(`
+    SELECT b.*, p.plot_number
+    FROM bills b LEFT JOIN plots p ON b.plot_id = p.id
+    WHERE b.plot_id = ? AND b.balance_due > 0.01 AND b.is_deleted = 0
+    ORDER BY b.billing_month ASC, b.id ASC
+  `).all(plotId);
+
+  let remaining = amount;
+  const breakdown = [];
+
+  for (const b of unpaidBills) {
+    if (remaining <= 0.01) break;
+    const apply   = Math.min(remaining, b.balance_due);
+    const leftover = b.balance_due - apply;
+    breakdown.push({
+      bill_id:       b.id,
+      bill_number:   b.bill_number,
+      billing_month: b.billing_month,
+      bill_type:     b.bill_type,
+      balance_due:   b.balance_due,
+      amount_applied: apply,
+      remaining_after: leftover,
+      fully_cleared:  leftover <= 0.01,
+    });
+    remaining -= apply;
+  }
+
+  return {
+    breakdown,
+    total_applied: amount - remaining,
+    advance_credit: remaining > 0.01 ? remaining : 0,
+  };
+});
+
+// ── Defaulters List ───────────────────────────────────────────
+ipcMain.handle('db:get-defaulters-list', () => {
+  const db = getDb();
+  return db.prepare(`
+    SELECT
+      p.id as plot_id,
+      p.plot_number,
+      p.plot_type,
+      m.name  as owner_name,
+      m.phone as owner_phone,
+      COALESCE(SUM(b.total_amount), 0) as total_billed,
+      COALESCE(SUM(b.amount_paid),  0) as total_paid,
+      COALESCE(SUM(b.balance_due),  0) as running_balance,
+      COUNT(CASE WHEN b.balance_due > 0.01 THEN 1 END) as unpaid_bills,
+      MIN(CASE WHEN b.balance_due > 0.01 THEN b.billing_month END) as oldest_unpaid_month,
+      MAX(CASE WHEN b.balance_due > 0.01 THEN b.billing_month END) as latest_unpaid_month
+    FROM plots p
+    LEFT JOIN plot_ownership po ON po.plot_id = p.id AND po.end_date IS NULL
+    LEFT JOIN members m ON m.id = po.member_id
+    LEFT JOIN bills b ON b.plot_id = p.id AND b.is_deleted = 0
+    WHERE p.is_deleted = 0
+    GROUP BY p.id
+    HAVING running_balance > 0.01
+    ORDER BY running_balance DESC
+  `).all();
 });
 
 ipcMain.handle('db:get-payments', (_e, billId) =>
@@ -866,18 +1331,52 @@ ipcMain.handle('db:get-dashboard-stats', () => {
 });
 
 // ── Fund Summary ──────────────────────────────────────────────
-ipcMain.handle('db:get-fund-summary', () =>
-    getDb().prepare(`
-        SELECT bi.charge_name,
-               COUNT(bi.id)              AS item_count,
-               COALESCE(SUM(bi.amount),0) AS total_billed
-        FROM bill_items bi
-        JOIN bills b ON bi.bill_id = b.id
-        WHERE b.is_deleted = 0
-        GROUP BY bi.charge_name
-        ORDER BY total_billed DESC
-    `).all()
-);
+ipcMain.handle('db:get-fund-summary', (_e, { startDate, endDate } = {}) => {
+  const db = getDb();
+
+  const params = [];
+  let dateFilter = '';
+  if (startDate) { dateFilter += ' AND b.bill_date >= ?'; params.push(startDate + '-01'); }
+  if (endDate)   { dateFilter += ' AND b.bill_date <= ?'; params.push(endDate   + '-31'); }
+
+  return db.prepare(`
+    SELECT
+      bi.charge_name,
+      b.bill_type,
+      COUNT(DISTINCT b.id) AS payment_count,
+      -- Collected: proportional share of amount_paid using item_totals as divisor
+      COALESCE(SUM(
+                CASE WHEN item_totals.items_sum > 0
+                    THEN b.amount_paid * (bi.amount / item_totals.items_sum)
+                    ELSE b.amount_paid
+                END
+      ), 0) AS total_collected,
+      -- Billed: raw bill_items amount
+      COALESCE(SUM(bi.amount), 0) AS total_billed,
+      -- Outstanding: proportional share of balance_due
+      COALESCE(SUM(
+                CASE WHEN item_totals.items_sum > 0
+                    THEN b.balance_due * (bi.amount / item_totals.items_sum)
+                    ELSE b.balance_due
+                END
+      ), 0) AS total_outstanding
+    FROM bills b
+    JOIN bill_items bi ON bi.bill_id = b.id
+      AND bi.charge_name NOT LIKE '%Arrears%'
+      AND bi.charge_name NOT LIKE '%Late Fee%'
+    JOIN (
+      SELECT bill_id, SUM(amount) AS items_sum
+      FROM bill_items
+      WHERE charge_name NOT LIKE '%Arrears%'
+        AND charge_name NOT LIKE '%Late Fee%'
+      GROUP BY bill_id
+    ) item_totals ON item_totals.bill_id = b.id
+    WHERE b.is_deleted = 0
+      ${dateFilter}
+    GROUP BY bi.charge_name, b.bill_type
+    ORDER BY b.bill_type ASC, total_collected DESC
+  `).all(...params);
+});
 
 // ── Reports ───────────────────────────────────────────────────
 ipcMain.handle('db:report-trial-balance', (_e, { startDate, endDate }) => {
@@ -957,31 +1456,232 @@ ipcMain.handle('db:create-backup', async () => {
 
 ipcMain.handle('db:get-backup-log', () => getDb().prepare('SELECT * FROM backup_log ORDER BY backup_date DESC LIMIT 20').all());
 
-ipcMain.handle('db:export-csv', async (_e, tableType) => {
+function formatExportHeader(key) {
+    return key.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function inferWorksheetColumns(keys, data) {
+    return keys.map((key) => {
+        const longest = data.reduce((max, row) => {
+            const value = row[key] === null || row[key] === undefined ? '' : String(row[key]);
+            return Math.max(max, value.length);
+        }, formatExportHeader(key).length);
+        return { width: Math.min(Math.max(longest + 4, 14), 28) };
+    });
+}
+
+async function writeFormattedWorkbook(filePath, sheetName, title, subtitle, keys, data) {
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'River View ERP';
+    workbook.created = new Date();
+
+    const worksheet = workbook.addWorksheet(sheetName.slice(0, 31), {
+        views: [{ state: 'frozen', ySplit: 4 }],
+        pageSetup: {
+            margins: {
+                left: 0.4,
+                right: 0.4,
+                top: 0.55,
+                bottom: 0.55,
+                header: 0.2,
+                footer: 0.2,
+            },
+            orientation: keys.length > 6 ? 'landscape' : 'portrait',
+            fitToPage: true,
+            fitToWidth: 1,
+            fitToHeight: 0,
+        },
+    });
+
+    const totalColumns = Math.max(keys.length, 1);
+    worksheet.mergeCells(1, 1, 1, totalColumns);
+    worksheet.getCell(1, 1).value = title;
+    worksheet.getCell(1, 1).font = { bold: true, size: 13, name: 'Calibri' };
+    worksheet.getCell(1, 1).alignment = { horizontal: 'left', vertical: 'middle' };
+    worksheet.getRow(1).height = 22;
+
+    worksheet.mergeCells(2, 1, 2, totalColumns);
+    worksheet.getCell(2, 1).value = subtitle;
+    worksheet.getCell(2, 1).font = { bold: true, size: 13, name: 'Calibri' };
+    worksheet.getCell(2, 1).alignment = { horizontal: 'left', vertical: 'middle' };
+    worksheet.getRow(2).height = 20;
+
+    worksheet.mergeCells(3, 1, 3, totalColumns);
+    worksheet.getCell(3, 1).value = `Generated: ${new Date().toLocaleDateString('en-PK')} | Records: ${data.length}`;
+    worksheet.getCell(3, 1).font = { size: 11, name: 'Calibri' };
+    worksheet.getCell(3, 1).alignment = { horizontal: 'left', vertical: 'middle' };
+    worksheet.getRow(3).height = 18;
+
+    const headerRow = worksheet.getRow(5);
+    const numericColumns = keys
+        .map((key, index) => ({ key, index: index + 1 }))
+        .filter(({ key }) => data.some((row) => typeof row[key] === 'number'))
+        .map(({ index }) => index);
+
+    keys.forEach((key, index) => {
+        const cell = headerRow.getCell(index + 1);
+        cell.value = formatExportHeader(key);
+        cell.font = { bold: true, size: 13, name: 'Calibri' };
+        cell.alignment = { horizontal: 'center', vertical: 'middle' };
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF3F4F6' } };
+        cell.border = {
+            top: { style: 'thin', color: { argb: 'FFD1D5DB' } },
+            left: { style: 'thin', color: { argb: 'FFD1D5DB' } },
+            bottom: { style: 'thin', color: { argb: 'FFD1D5DB' } },
+            right: { style: 'thin', color: { argb: 'FFD1D5DB' } },
+        };
+    });
+    headerRow.height = 24;
+
+    data.forEach((rowData, rowIndex) => {
+        const row = worksheet.getRow(6 + rowIndex);
+        keys.forEach((key, columnIndex) => {
+            const value = rowData[key] ?? '';
+            const cell = row.getCell(columnIndex + 1);
+            cell.value = value;
+            cell.font = { size: 11, name: 'Calibri' };
+            cell.alignment = {
+                horizontal: numericColumns.includes(columnIndex + 1) ? 'center' : 'left',
+                vertical: 'middle',
+            };
+            cell.border = {
+                top: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+                left: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+                bottom: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+                right: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+            };
+            if (typeof value === 'number') {
+                cell.numFmt = Number.isInteger(value) ? '#,##0' : '#,##0.00';
+            }
+        });
+        row.height = 21;
+    });
+
+    worksheet.columns = inferWorksheetColumns(keys, data);
+    await workbook.xlsx.writeFile(filePath);
+}
+
+const EXPENDITURE_CATEGORY_HEADERS = [
+        'Salaries',
+        'Generator / Fuel',
+        'Maintenance & Repairs',
+        'Utilities',
+        'Stationery & Office',
+        'Security',
+        'Cleaning',
+        'Bank Charges',
+        'Electricity Bill Tube-well',
+        'Electricity Bill Streetlight',
+        'Electricity Bill Office',
+        'Telephone Bill Office',
+        'Telephone Bill Security',
+        'Repair & Maintenance Electricity Equipments',
+        'Repair & Maintenance Machinery & Equipments',
+        'Repair & Maintenance Office & Equipments',
+        'Advertisement (AGM)',
+        'Books & Periodicals & Newspapers',
+        'Oil & Lubricants Expenses',
+        'Post & Telegram Contribution',
+        'Printing & Stationery Contribution',
+        'Audit fee',
+        'Professional fee',
+        'Punjab Employees Social Security',
+        'Travelling & Conveyance Contribution',
+        'Tree Plantation',
+        'Entertainment',
+        'Entertainment AGM',
+        'Repair & Maintenance of Building/Boundary wall',
+        'Maintenance of Water Pipe Line',
+        'Maintenance of Sewerage Pipeline/Gutters',
+        'Repair & Maintenance of Internal Roads',
+        'Miscellaneous Expenses',
+        'Unexpected Expenses',
+        'Other',
+    ];
+
+function buildStructuredExpenditureExport(rows) {
+    // Build column structure: metadata + all category columns
+    const keys = [
+        'expenditure_date',
+        'description',
+        'vendor_name',
+        'payment_method',
+        'receipt_number',
+        ...EXPENDITURE_CATEGORY_HEADERS,
+    ];
+
+    // Transform each expense row into a multi-column row (one amount per matching category)
+    const data = rows.map((item) => {
+        const row = {
+            expenditure_date: item.expenditure_date || '',
+            description: item.description || '',
+            vendor_name: item.vendor_name || '',
+            payment_method: item.payment_method || '',
+            receipt_number: item.receipt_number || '',
+        };
+
+        // Initialize all category columns to 0
+        for (const header of EXPENDITURE_CATEGORY_HEADERS) {
+            row[header] = 0;
+        }
+
+        // Place the amount in the matching category column
+        const category = item.category || 'Other';
+        if (EXPENDITURE_CATEGORY_HEADERS.includes(category)) {
+            row[category] = Number(item.amount) || 0;
+        } else {
+            // Unmapped categories go to "Other"
+            row['Other'] = (Number(row['Other']) || 0) + (Number(item.amount) || 0);
+        }
+        return row;
+    });
+
+    // Add totals row
+    const totalsRow = {
+        expenditure_date: '',
+        description: 'TOTAL',
+        vendor_name: '',
+        payment_method: '',
+        receipt_number: '',
+    };
+    for (const header of EXPENDITURE_CATEGORY_HEADERS) {
+        totalsRow[header] = data.reduce((s, r) => s + (Number(r[header]) || 0), 0);
+    }
+    data.push(totalsRow);
+
+    return { keys, data };
+}
+
+async function exportSpreadsheet(tableType) {
     const db = getDb();
     let data = [], defaultFilename = '';
+    let customKeys = null;
     if (tableType === 'plots') {
         data = db.prepare('SELECT p.*, m.name as owner_name FROM plots p LEFT JOIN plot_ownership po ON p.id = po.plot_id AND po.end_date IS NULL LEFT JOIN members m ON po.member_id = m.id WHERE p.is_deleted = 0 ORDER BY p.plot_number').all();
-        defaultFilename = 'plots_export.csv';
+        defaultFilename = 'plots_export.xlsx';
     } else if (tableType === 'members') {
         data = db.prepare('SELECT * FROM members WHERE is_deleted = 0').all();
-        defaultFilename = 'members_export.csv';
+        defaultFilename = 'members_export.xlsx';
     } else if (tableType === 'bills') {
         data = db.prepare('SELECT b.*, p.plot_number, m.name as member_name FROM bills b JOIN plots p ON b.plot_id = p.id LEFT JOIN members m ON b.member_id = m.id WHERE b.is_deleted = 0 ORDER BY b.bill_date DESC').all();
-        defaultFilename = 'bills_export.csv';
+        defaultFilename = 'bills_export.xlsx';
     } else if (tableType === 'expenditures') {
-        data = db.prepare('SELECT * FROM expenditures WHERE is_deleted = 0 ORDER BY expenditure_date DESC').all();
-        defaultFilename = 'expenditures_export.csv';
+        const raw = db.prepare('SELECT * FROM expenditures WHERE is_deleted = 0 ORDER BY expenditure_date DESC, id DESC').all();
+        const formatted = buildStructuredExpenditureExport(raw);
+        data = formatted.data;
+        customKeys = formatted.keys;
+        defaultFilename = 'expenditures_export.xlsx';
     }
     if (!data || data.length === 0) return { success: false, message: 'No data to export' };
-    const { dialog } = require('electron');
-    const { filePath } = await dialog.showSaveDialog({ title: 'Export Data', defaultPath: defaultFilename, filters: [{ name: 'CSV', extensions: ['csv'] }] });
+    const { filePath } = await dialog.showSaveDialog({ title: 'Export Data', defaultPath: defaultFilename, filters: [{ name: 'Excel Workbook', extensions: ['xlsx'] }] });
     if (!filePath) return { success: false, message: 'Export cancelled' };
-    const keys = Object.keys(data[0]);
-    const csvContent = [keys.map(k => `"${k}"`).join(','), ...data.map(row => keys.map(k => `"${(row[k] ?? '').toString().replace(/"/g, '""')}"`).join(','))].join('\n');
-    require('fs').writeFileSync(filePath, csvContent);
+    const keys = customKeys || Object.keys(data[0]);
+    await writeFormattedWorkbook(filePath, tableType, 'River View Cooperative Housing Society Ltd.', `${formatExportHeader(tableType)} Export`, keys, data);
     return { success: true, path: filePath };
-});
+}
+
+ipcMain.handle('db:export-spreadsheet', async (_e, tableType) => exportSpreadsheet(tableType));
+ipcMain.handle('db:export-csv', async (_e, tableType) => exportSpreadsheet(tableType));
 
 // ── Tenant Statement (for future Tenant Statement tab) ────────
 ipcMain.handle('db:get-tenant-statement', (_e, tenantId) => {

@@ -10,7 +10,7 @@ const ipc = (window as any).ipcRenderer
 const fmt = (n: any) => `Rs. ${(Number(n) || 0).toLocaleString()}`
 const currentMonth = () => new Date().toISOString().slice(0, 7)
 
-type MainTab = 'generate' | 'monthly' | 'tenant' | 'special'
+type MainTab = 'generate' | 'monthly' | 'tenant' | 'special' | 'defaulters'
 
 function StatusBadge({ status }: { status: string }) {
   const cls: Record<string, string> = {
@@ -26,16 +26,16 @@ function KpiStrip({ bills }: { bills: any[] }) {
   const outstanding = bills.reduce((s, b) => s + (b.balance_due  || 0), 0)
   const unpaid      = bills.filter(b => b.status !== 'paid').length
   return (
-    <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:'1rem', marginBottom:'1.25rem' }}>
+    <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:'1.5rem', marginBottom:'1.75rem' }}>
       {[
         { label:'TOTAL BILLED',  val: fmt(billed),      sub:`${bills.length} bills` },
         { label:'COLLECTED',     val: fmt(collected),   clr:'var(--c-paid)' },
         { label:'OUTSTANDING',   val: fmt(outstanding), clr: outstanding > 0 ? 'var(--c-overdue)' : undefined },
         { label:'UNPAID',        val: String(unpaid),   sub:'bills pending', clr: unpaid > 0 ? 'var(--c-partial)' : undefined },
       ].map((k: any) => (
-        <div key={k.label} style={{ background:'var(--bg-card)', border:'1px solid var(--border)', borderRadius:'var(--r-lg)', padding:'1rem 1.25rem', boxShadow:'var(--shadow-card)' }}>
-          <div style={{ fontSize:'0.7rem', fontWeight:600, color:'var(--t-faint)', letterSpacing:'0.07em', marginBottom:'0.4rem' }}>{k.label}</div>
-          <div style={{ fontSize:'1.15rem', fontWeight:700, fontFamily:'IBM Plex Mono', color:k.clr }}>{k.val}</div>
+        <div key={k.label} style={{ background:'var(--bg-card)', border:'1px solid var(--border)', borderRadius:'var(--r-lg)', padding:'1.35rem 1.6rem', boxShadow:'var(--shadow-card)' }}>
+          <div style={{ fontSize:'0.72rem', fontWeight:600, color:'var(--t-faint)', letterSpacing:'0.07em', marginBottom:'0.4rem' }}>{k.label}</div>
+          <div style={{ fontSize:'1.2rem', fontWeight:700, fontFamily:'IBM Plex Mono', color:k.clr }}>{k.val}</div>
           {k.sub && <div style={{ fontSize:'0.78rem', color:'var(--t-faint)', marginTop:'0.2rem' }}>{k.sub}</div>}
         </div>
       ))}
@@ -45,7 +45,7 @@ function KpiStrip({ bills }: { bills: any[] }) {
 
 function FilterBar({ search, onSearch, month, onMonth, status, onStatus, allMonths, onAllMonths }: any) {
   return (
-    <div style={{ display:'flex', gap:'0.75rem', alignItems:'center', flexWrap:'wrap', marginBottom:'1rem' }}>
+    <div style={{ display:'flex', gap:'0.85rem', alignItems:'center', flexWrap:'wrap', marginBottom:'1.5rem' }}>
       <div style={{ position:'relative', flex:'0 1 220px', minWidth:150 }}>
         <Search size={13} style={{ position:'absolute', left:10, top:'50%', transform:'translateY(-50%)', color:'var(--t-faint)', pointerEvents:'none' }} />
         <input value={search} onChange={e => onSearch(e.target.value)} placeholder="Search…" style={{ paddingLeft:30, width:'100%', boxSizing:'border-box' }} />
@@ -186,19 +186,39 @@ function PaymentPanel({ bill, detail, onClose, onSuccess }: any) {
   const [error,   setError]   = useState('')
   const [posted,  setPosted]  = useState('')
   const [credit,  setCredit]  = useState(0)
+  const [preview, setPreview] = useState<any>(null)
+
+  // Separate current month charges from arrears
+  const currentItems    = (detail?.items || []).filter(
+    (it: any) => !it.charge_name?.toLowerCase().includes('arrears')
+      && !it.charge_name?.toLowerCase().includes('late fee')
+  )
+  const previousBalance = 0  // arrears now merged into charge lines — section hidden
+  const currentTotal    = bill?.total_amount || currentItems.reduce((s: number, i: any) => s + (i.amount || 0), 0)
+  const alreadyPaid     = bill?.amount_paid || 0
+  const balanceDue      = bill?.balance_due || 0
 
   useEffect(() => {
-    setAmount(String(bill?.balance_due || ''))
-    setMethod('cash'); setReceipt(''); setNotes(''); setError(''); setPosted('')
-    setCredit(0)
+    setAmount(String(balanceDue || ''))
+    setMethod('cash'); setReceipt(''); setNotes('')
+    setError(''); setPosted(''); setPreview(null)
     if (bill?.plot_id && ipc) {
-      ipc.invoke('db:get-plot-credit', bill.plot_id).then((r: any) => setCredit(r?.balance || 0))
+      ipc.invoke('db:get-plot-credit', bill.plot_id)
+        .then((r: any) => setCredit(r?.balance || 0))
     }
   }, [bill?.id])
 
+  // Live coverage preview — runs silently, shown simply
+  useEffect(() => {
+    const amt = parseFloat(amount)
+    if (!bill?.plot_id || !amt || amt <= 0) { setPreview(null); return }
+    ipc.invoke('db:get-payment-preview', { plotId: bill.plot_id, amount: amt })
+      .then((r: any) => setPreview(r))
+  }, [amount, bill?.plot_id])
+
   const handlePay = async () => {
     const amt = parseFloat(amount)
-    if (!amt || amt <= 0)              { setError('Enter a valid amount'); return }
+    if (!amt || amt <= 0) { setError('Enter a valid amount'); return }
     setLoading(true); setError('')
     try {
       const r = await ipc.invoke('db:record-payment', {
@@ -211,14 +231,51 @@ function PaymentPanel({ bill, detail, onClose, onSuccess }: any) {
     finally { setLoading(false) }
   }
 
+  // Human-readable coverage line e.g. "Clears Jan-26, Feb-26 · Mar-26 partial"
+  const coverageLine = (() => {
+    if (!preview?.breakdown?.length) return null
+    const cleared = preview.breakdown.filter((b: any) => b.fully_cleared).map((b: any) => b.billing_month)
+    const partial  = preview.breakdown.filter((b: any) => !b.fully_cleared)
+    const parts = []
+    if (cleared.length)  parts.push(`Clears ${cleared.join(', ')}`)
+    if (partial.length)  parts.push(`${partial[0].billing_month} partial (Rs. ${partial[0].remaining_after.toLocaleString()} left)`)
+    if (preview.advance_credit > 0) parts.push(`Rs. ${preview.advance_credit.toLocaleString()} saved as advance`)
+    return parts.join(' · ')
+  })()
+
+  const row = (label: string, value: string, opts: any = {}) => (
+    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center',
+      fontSize: opts.large ? '0.95rem' : '0.845rem',
+      fontWeight: opts.bold ? 700 : 400,
+      padding: opts.large ? '0.5rem 0' : '0.22rem 0',
+      borderTop: opts.separator ? '1px solid var(--border)' : undefined,
+      marginTop: opts.separator ? '0.4rem' : undefined,
+      color: opts.color || 'inherit' }}>
+      <span style={{ color: opts.labelFaint ? 'var(--t-muted)' : 'inherit' }}>{label}</span>
+      <span style={{ fontFamily:'IBM Plex Mono' }}>{value}</span>
+    </div>
+  )
+
   return (
     <PanelShell width={440}>
       <div className="panel-header">
-        <h3 style={{ margin:0 }}>{posted ? 'Payment Posted' : 'Collect Payment'}</h3>
+        <div>
+          <h3 style={{ margin:0 }}>{posted ? 'Payment Posted' : 'Collect Payment'}</h3>
+          {!posted && (
+            <div style={{ fontSize:'0.78rem', color:'var(--t-faint)', marginTop:2 }}>
+              {bill.bill_number} · Plot {bill.plot_number}
+              {bill.owner_name  && <span> · {bill.owner_name}</span>}
+              {bill.tenant_name && <span> · {bill.tenant_name}</span>}
+            </div>
+          )}
+        </div>
         <button className="btn btn-ghost btn-sm" onClick={onClose}><X size={16}/></button>
       </div>
+
+      {/* ── Success state ── */}
       {posted ? (
-        <div style={{ flex:1, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', padding:'3rem 2rem', textAlign:'center' }}>
+        <div style={{ flex:1, display:'flex', flexDirection:'column', alignItems:'center',
+          justifyContent:'center', padding:'3rem 2rem', textAlign:'center' }}>
           <CheckCircle size={48} color="var(--c-paid)" style={{ marginBottom:'1rem' }}/>
           <h3 style={{ marginBottom:'0.5rem' }}>Payment Recorded</h3>
           <div style={{ color:'var(--t-faint)', fontSize:'0.875rem', marginBottom:'1.5rem' }}>
@@ -228,53 +285,79 @@ function PaymentPanel({ bill, detail, onClose, onSuccess }: any) {
         </div>
       ) : (
         <div className="panel-body" style={{ flex:1 }}>
-          <div style={{ background:'var(--bg-page)', border:'1px solid var(--border)', borderRadius:8, padding:'1rem', marginBottom:'1.25rem' }}>
-            <div style={{ fontSize:'0.78rem', color:'var(--t-faint)', marginBottom:'0.5rem' }}>
-              {bill.bill_number} · Plot {bill.plot_number}
-              {bill.tenant_name && <span> · {bill.tenant_name}</span>}
-              {bill.owner_name && !bill.tenant_name && <span> · {bill.owner_name}</span>}
-            </div>
-            {detail?.items?.length > 0 && (
-              <div style={{ borderBottom:'1px solid var(--border)', paddingBottom:'0.6rem', marginBottom:'0.6rem' }}>
-                {detail.items.map((it:any, i:number) => (
-                  <div key={i} style={{ display:'flex', justifyContent:'space-between', fontSize:'0.83rem', padding:'0.1rem 0' }}>
-                    <span style={{ color:'var(--t-muted)' }}>{it.charge_name}</span>
-                    <span style={{ fontFamily:'IBM Plex Mono' }}>{fmt(it.amount)}</span>
-                  </div>
-                ))}
+
+          {/* ────────────────────────────────────────────
+              SECTION 1 — Previous Balance
+          ──────────────────────────────────────────── */}
+          {previousBalance > 0 && (
+            <div style={{ background:'rgba(239,68,68,0.06)', border:'1px solid rgba(239,68,68,0.2)',
+              borderRadius:8, padding:'0.85rem 1rem', marginBottom:'0.85rem' }}>
+              <div style={{ fontSize:'0.7rem', fontWeight:700, color:'var(--c-overdue)',
+                letterSpacing:'0.08em', textTransform:'uppercase', marginBottom:'0.4rem' }}>
+                Previous Balance
               </div>
-            )}
-            <div style={{ display:'flex', justifyContent:'space-between', fontSize:'0.83rem', marginBottom:'0.2rem' }}>
-              <span style={{ color:'var(--t-muted)' }}>Total Billed</span>
-              <span style={{ fontFamily:'IBM Plex Mono' }}>{fmt(bill.total_amount)}</span>
+              {row('Outstanding dues', `Rs. ${previousBalance.toLocaleString()}`,
+                { bold:true, color:'var(--c-overdue)' })}
             </div>
-            {bill.amount_paid > 0 && (
-              <div style={{ display:'flex', justifyContent:'space-between', fontSize:'0.83rem', marginBottom:'0.2rem' }}>
-                <span style={{ color:'var(--t-muted)' }}>Already Paid</span>
-                <span style={{ fontFamily:'IBM Plex Mono', color:'var(--c-paid)' }}>−{fmt(bill.amount_paid)}</span>
-              </div>
-            )}
-            {credit > 0 && (
-              <div style={{ display:'flex', justifyContent:'space-between', fontSize:'0.83rem', marginBottom:'0.2rem' }}>
-                <span style={{ color:'var(--t-muted)' }}>Advance Credit</span>
-                <span style={{ fontFamily:'IBM Plex Mono', color:'var(--accent)' }}>+{fmt(credit)} available</span>
-              </div>
-            )}
-            <div style={{ display:'flex', justifyContent:'space-between', fontWeight:700, borderTop:'1px solid var(--border)', paddingTop:'0.5rem', marginTop:'0.3rem' }}>
-              <span>Balance Due</span>
-              <span style={{ fontFamily:'IBM Plex Mono', color:'var(--c-overdue)' }}>{fmt(bill.balance_due)}</span>
+          )}
+
+          {/* ────────────────────────────────────────────
+              SECTION 2 — Current Month Charges
+          ──────────────────────────────────────────── */}
+          <div style={{ background:'var(--bg-page)', border:'1px solid var(--border)',
+            borderRadius:8, padding:'0.85rem 1rem', marginBottom:'0.85rem' }}>
+            <div style={{ fontSize:'0.7rem', fontWeight:700, color:'var(--t-faint)',
+              letterSpacing:'0.08em', textTransform:'uppercase', marginBottom:'0.4rem' }}>
+              {bill.billing_month || 'Current Month'} Charges
             </div>
-            <div style={{ fontSize:'0.78rem', color:'var(--t-faint)', marginTop:'0.3rem', fontStyle:'italic' }}>
-              {credit > 0
-                ? 'Any amount above balance due will be added to advance credit.'
-                : 'To save advance credit, enter more than the balance due.'}
-            </div>
+            {currentItems.length > 0
+              ? currentItems.map((it: any, i: number) =>
+                  row(it.charge_name, `Rs. ${(it.amount || 0).toLocaleString()}`,
+                    { labelFaint: true, key: i }))
+              : row('Monthly charges', `Rs. ${currentTotal.toLocaleString()}`, { labelFaint:true })}
+            {row('Current total', `Rs. ${currentTotal.toLocaleString()}`,
+              { bold:true, separator:true })}
           </div>
+
+          {/* ────────────────────────────────────────────
+              SECTION 3 — Final Payable
+          ──────────────────────────────────────────── */}
+          <div style={{ background:'var(--bg-page)', border:'1px solid var(--border)',
+            borderRadius:8, padding:'0.85rem 1rem', marginBottom:'1.1rem' }}>
+            {previousBalance > 0 &&
+              row('Previous balance', `Rs. ${previousBalance.toLocaleString()}`,
+                { labelFaint:true, color:'var(--c-overdue)' })}
+            {previousBalance > 0 &&
+              row('Current total', `Rs. ${currentTotal.toLocaleString()}`,
+                { labelFaint:true })}
+            {alreadyPaid > 0 &&
+              row('Already paid', `− Rs. ${alreadyPaid.toLocaleString()}`,
+                { labelFaint:true, color:'var(--c-paid)' })}
+            {credit > 0 &&
+              row(`Advance credit available`, `Rs. ${credit.toLocaleString()}`,
+                { labelFaint:true, color:'var(--accent)' })}
+            {row('Total Payable',
+              `Rs. ${balanceDue.toLocaleString()}`,
+              { bold:true, large:true, separator: previousBalance > 0 || alreadyPaid > 0 })}
+          </div>
+
+          {/* ────────────────────────────────────────────
+              SECTION 4 — Payment Input
+          ──────────────────────────────────────────── */}
           <div className="form-group">
             <label>Amount (Rs.)</label>
-            <input type="number" value={amount} onChange={e => setAmount(e.target.value)} placeholder="0" min="0"
-              style={{ fontSize:'1.1rem', fontWeight:600, fontFamily:'IBM Plex Mono' }} autoFocus />
+            <input type="number" value={amount} onChange={e => setAmount(e.target.value)}
+              placeholder="0" min="0" autoFocus
+              style={{ fontSize:'1.1rem', fontWeight:700, fontFamily:'IBM Plex Mono' }} />
+            {/* Coverage line — plain language, no "FIFO" jargon */}
+            {coverageLine && (
+              <div style={{ fontSize:'0.78rem', color:'var(--t-faint)', marginTop:'0.4rem',
+                fontStyle:'italic', lineHeight:1.5 }}>
+                {coverageLine}
+              </div>
+            )}
           </div>
+
           <div className="form-group">
             <label>Payment Method</label>
             <div style={{ display:'flex', gap:'0.5rem' }}>
@@ -287,26 +370,40 @@ function PaymentPanel({ bill, detail, onClose, onSuccess }: any) {
               ))}
             </div>
           </div>
+
           <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'0.75rem' }}>
             <div className="form-group">
               <label>Receipt No. <small style={{ color:'var(--t-faint)' }}>(auto if blank)</small></label>
-              <input type="text" value={receipt} onChange={e => setReceipt(e.target.value)} placeholder="Auto-generated" />
+              <input type="text" value={receipt} onChange={e => setReceipt(e.target.value)}
+                placeholder="Auto-generated" />
             </div>
             <div className="form-group">
               <label>Notes <small style={{ color:'var(--t-faint)' }}>(optional)</small></label>
-              <input type="text" value={notes} onChange={e => setNotes(e.target.value)} placeholder="e.g. cheque no." />
+              <input type="text" value={notes} onChange={e => setNotes(e.target.value)}
+                placeholder="e.g. cheque no." />
             </div>
           </div>
-          {error && <div className="msg msg-error" style={{ marginBottom:'1rem' }}>{error}</div>}
+
+          {error && (
+            <div className="msg msg-error" style={{ marginBottom:'1rem' }}>{error}</div>
+          )}
+
           <div style={{ display:'flex', gap:'0.75rem' }}>
-            <button className="btn btn-primary" style={{ flex:1 }} onClick={handlePay} disabled={loading}>
-              {loading ? <><RefreshCw size={15} className="spin"/> Posting…</> : <><CreditCard size={15}/> Post Payment</>}
+            <button className="btn btn-primary" style={{ flex:1 }}
+              onClick={handlePay} disabled={loading}>
+              {loading
+                ? <><RefreshCw size={15} className="spin"/> Posting…</>
+                : <><CreditCard size={15}/> Post Payment</>}
             </button>
-            <button type="button" className="btn btn-ghost" onClick={() =>
-              ipc.invoke('db:print-challan', { billId: bill.id, amount: parseFloat(amount) || null })
-            }>🖨 Print Challan</button>
+            <button type="button" className="btn btn-ghost"
+              onClick={() => ipc.invoke('db:print-challan', {
+                billId: bill.id, amount: parseFloat(amount) || null
+              })}>
+              🖨 Challan
+            </button>
             <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
           </div>
+
         </div>
       )}
     </PanelShell>
@@ -542,6 +639,8 @@ export default function BillingPage() {
   const [genMsg,         setGenMsg]         = useState<{text:string;ok:boolean}|null>(null)
   const [isApplyingFee,  setIsApplyingFee]  = useState(false)
   const [feeMsg,         setFeeMsg]         = useState<{text:string;ok:boolean}|null>(null)
+  const [fixing,         setFixing]         = useState(false)
+  const [fixMsg,         setFixMsg]         = useState<{text:string;ok:boolean}|null>(null)
 
   const [monthlyBills,   setMonthlyBills]   = useState<any[]>([])
   const [monthlyMonth,   setMonthlyMonth]   = useState(currentMonth())
@@ -573,6 +672,10 @@ export default function BillingPage() {
 
   // Tenant statement
   const [statementBill,  setStatementBill]  = useState<any>(null)
+
+  // Defaulters
+  const [defaulters, setDefaulters] = useState<any[]>([])
+  const [defaultersLoading, setDefaultersLoading] = useState(false)
 
   const loadMonthly = useCallback(async () => {
     if (!ipc) return; setMonthlyLoading(true)
@@ -611,9 +714,18 @@ export default function BillingPage() {
     setPlots((await ipc.invoke('db:get-plots')) || [])
   }, [])
 
+  const loadDefaulters = useCallback(async () => {
+    if (!ipc) return; setDefaultersLoading(true)
+    try {
+      const r = await ipc.invoke('db:get-defaulters-list')
+      setDefaulters(r || [])
+    } finally { setDefaultersLoading(false) }
+  }, [])
+
   useEffect(() => { if (tab === 'monthly') loadMonthly() }, [tab, loadMonthly])
   useEffect(() => { if (tab === 'tenant')  loadTenant()  }, [tab, loadTenant])
   useEffect(() => { if (tab === 'special') { loadSpecial(); loadPlots() } }, [tab, loadSpecial, loadPlots])
+  useEffect(() => { if (tab === 'defaulters') loadDefaulters() }, [tab, loadDefaulters])
 
   const handleGenerate = async () => {
     setIsGenerating(true); setGenMsg(null)
@@ -672,20 +784,21 @@ export default function BillingPage() {
     { id:'monthly'  as MainTab, label:'Monthly Bills',   icon:<FileText size={14}/> },
     { id:'tenant'   as MainTab, label:'Tenant Bills',    icon:<Users    size={14}/> },
     { id:'special'  as MainTab, label:'Special Charges', icon:<Star     size={14}/> },
+    { id:'defaulters' as MainTab, label:'Defaulters',    icon:<AlertCircle size={14}/> },
     { id:'generate' as MainTab, label:'Generate',        icon:<Zap      size={14}/> },
   ]
 
   return (
-    <div className="page-container">
-      <div className="page-header">
+    <div className="page billing-page">
+      <div className="page-header" style={{ marginBottom:'2.25rem' }}>
         <div>
-          <h1 className="page-title">Billing</h1>
-          <p className="page-subtitle">Generate bills, collect payments, and manage special charges</p>
+          <h1>Billing</h1>
+          <p className="subtitle">Generate bills, collect payments, and manage special charges</p>
         </div>
         <div />
       </div>
 
-      <div style={{ display:'flex', gap:3, background:'var(--bg-page)', border:'1px solid var(--border)', borderRadius:'var(--r-lg)', padding:3, marginBottom:'1.5rem', width:'fit-content' }}>
+      <div style={{ display:'flex', gap:4, background:'var(--bg-page)', border:'1px solid var(--border)', borderRadius:'var(--r-lg)', padding:4, marginBottom:'2.25rem', width:'fit-content' }}>
         {TABS.map(t => (
           <button key={t.id} onClick={() => setTab(t.id)}
             style={{ display:'flex', alignItems:'center', gap:'0.4rem', padding:'0.42rem 1.1rem', borderRadius:'calc(var(--r-lg) - 3px)', fontSize:'0.84rem', fontWeight:500, border:'none', cursor:'pointer', transition:'all 0.15s',
@@ -725,6 +838,33 @@ export default function BillingPage() {
             </button>
             {feeMsg && <div className={`msg ${feeMsg.ok ? 'msg-success' : 'msg-error'}`} style={{ marginTop:'1rem' }}>{feeMsg.text}</div>}
           </div>
+          <div style={{ background:'var(--bg-card)', border:'1px solid var(--border)', borderRadius:'var(--r-lg)', padding:'1.5rem', boxShadow:'var(--shadow-card)' }}>
+            <h3 style={{ marginBottom:'0.25rem' }}>Fix Bill Items</h3>
+            <p style={{ color:'var(--t-faint)', fontSize:'0.85rem', marginBottom:'1.25rem', lineHeight:1.5 }}>
+              Redistributes old lump-sum arrears rows into per-charge lines. Run once, then this card can be removed.
+            </p>
+            <button className="btn btn-ghost"
+              style={{ borderColor:'var(--accent)', color:'var(--accent)' }}
+              onClick={async () => {
+                setFixing(true); setFixMsg(null)
+                try {
+                  const r = await ipc.invoke('db:fix-arrears-bill-items')
+                  setFixMsg({ text: `✓ Fixed ${r.fixed} of ${r.total} bills${r.errors.length ? ` · ${r.errors.length} errors` : ''}`, ok: r.errors.length === 0 })
+                } catch (e: any) { setFixMsg({ text: e.message, ok: false }) }
+                finally { setFixing(false) }
+              }}
+              disabled={fixing}>
+              {fixing
+                ? <><RefreshCw size={15} className="spin"/> Fixing…</>
+                : <>⚙ Redistribute Arrears</>}
+            </button>
+            {fixMsg && (
+              <div className={`msg ${fixMsg.ok ? 'msg-success' : 'msg-error'}`}
+                style={{ marginTop:'1rem' }}>
+                {fixMsg.text}
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -745,9 +885,9 @@ export default function BillingPage() {
           <KpiStrip bills={tenantBills} />
 
           {/* ── Guidance + inline generate ── */}
-          <div style={{ display:'flex', alignItems:'center', gap:'0.75rem', flexWrap:'wrap',
+          <div style={{ display:'flex', alignItems:'center', gap:'0.85rem', flexWrap:'wrap',
             background:'rgba(59,130,246,0.06)', border:'1px solid rgba(59,130,246,0.18)',
-            borderRadius:8, padding:'0.65rem 1rem', marginBottom:'1rem' }}>
+            borderRadius:8, padding:'0.8rem 1rem', marginBottom:'1.25rem' }}>
             <Users size={13} style={{ flexShrink:0, color:'var(--accent)' }} />
             <span style={{ fontSize:'0.83rem', color:'var(--t-faint)', flex:1 }}>
               Tenant challans are auto-generated with <strong style={{ color:'var(--t-primary)' }}>Generate Bills</strong>.
@@ -797,7 +937,7 @@ export default function BillingPage() {
       {tab === 'special' && (
         <>
           <KpiStrip bills={specialBills} />
-          <div style={{ display:'flex', gap:'0.75rem', alignItems:'center', flexWrap:'wrap', marginBottom:'1rem' }}>
+          <div style={{ display:'flex', gap:'0.85rem', alignItems:'center', flexWrap:'wrap', marginBottom:'1.5rem' }}>
             <div style={{ position:'relative', flex:'0 1 220px', minWidth:150 }}>
               <Search size={13} style={{ position:'absolute', left:10, top:'50%', transform:'translateY(-50%)', color:'var(--t-faint)', pointerEvents:'none' }} />
               <input value={specialSearch} onChange={e => setSpecialSearch(e.target.value)} placeholder="Search plot, charge…" style={{ paddingLeft:30, width:'100%', boxSizing:'border-box' }} />
@@ -886,6 +1026,62 @@ export default function BillingPage() {
                       </tr>
                     )}
                   </>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      {tab === 'defaulters' && (
+        <>
+          <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:'1.5rem', marginBottom:'1.75rem' }}>
+            {[
+              { label:'DEFAULTING PLOTS',   val: String(defaulters.length) },
+              { label:'TOTAL OUTSTANDING',  val: `Rs. ${defaulters.reduce((s,d) => s + d.running_balance, 0).toLocaleString()}`, clr:'var(--c-overdue)' },
+              { label:'AVG PER DEFAULTER',  val: defaulters.length ? `Rs. ${Math.round(defaulters.reduce((s,d) => s + d.running_balance, 0) / defaulters.length).toLocaleString()}` : 'Rs. 0' },
+            ].map((k:any) => (
+              <div key={k.label} style={{ background:'var(--bg-card)', border:'1px solid var(--border)', borderRadius:'var(--r-lg)', padding:'1.35rem 1.6rem' }}>
+                <div style={{ fontSize:'0.72rem', fontWeight:600, color:'var(--t-faint)', letterSpacing:'0.07em', marginBottom:'0.4rem' }}>{k.label}</div>
+                <div style={{ fontSize:'1.2rem', fontWeight:700, fontFamily:'IBM Plex Mono', color:k.clr }}>{k.val}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{ background:'var(--bg-card)', border:'1px solid var(--border)', borderRadius:'var(--r-lg)', overflow:'hidden' }}>
+            <table className="data-table" style={{ margin:0 }}>
+              <thead>
+                <tr>
+                  <th>Plot</th><th>Owner</th><th>Phone</th>
+                  <th>Oldest Unpaid</th><th>Bills Owing</th>
+                  <th style={{ textAlign:'right' }}>Running Balance</th><th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {defaultersLoading ? (
+                  <tr><td colSpan={7} className="empty-row">Loading…</td></tr>
+                ) : defaulters.length === 0 ? (
+                  <tr><td colSpan={7} className="empty-row">No defaulters — all plots are clear ✓</td></tr>
+                ) : defaulters.map(d => (
+                  <tr key={d.plot_id}>
+                    <td><strong>{d.plot_number}</strong></td>
+                    <td>{d.owner_name || '—'}</td>
+                    <td style={{ fontFamily:'IBM Plex Mono', fontSize:'0.83rem' }}>{d.owner_phone || '—'}</td>
+                    <td style={{ fontFamily:'IBM Plex Mono', fontSize:'0.83rem', color:'var(--c-overdue)' }}>{d.oldest_unpaid_month}</td>
+                    <td style={{ textAlign:'center' }}>
+                      <span style={{ background:'var(--c-overdue)', color:'#fff', borderRadius:4, padding:'2px 8px', fontSize:'0.75rem', fontWeight:700 }}>{d.unpaid_bills}</span>
+                    </td>
+                    <td style={{ textAlign:'right', fontFamily:'IBM Plex Mono', fontWeight:700, color:'var(--c-overdue)' }}>
+                      Rs. {d.running_balance.toLocaleString()}
+                    </td>
+                    <td>
+                      <button className="btn btn-primary btn-sm" onClick={() => {
+                        const msg = `Plot ${d.plot_number}: Rs. ${d.running_balance.toLocaleString()} outstanding since ${d.oldest_unpaid_month}`
+                        alert(msg)
+                      }}>
+                        Collect
+                      </button>
+                    </td>
+                  </tr>
                 ))}
               </tbody>
             </table>

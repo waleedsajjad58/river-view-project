@@ -652,4 +652,55 @@ function runMigrations() {
     db.prepare(`UPDATE settings SET value = '14' WHERE key = 'schema_version'`).run();
     currentVersion = 14;
   }
+
+  // Migration 15: charge_account_map + payment_allocations tables
+  if (currentVersion < 15) {
+    console.log('Running migration 15 (charge_account_map + payment_allocations)...');
+
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS payment_allocations (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        payment_id     INTEGER NOT NULL REFERENCES payments(id),
+        bill_id        INTEGER NOT NULL REFERENCES bills(id),
+        amount_applied REAL    NOT NULL,
+        created_at     TEXT    DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_alloc_payment ON payment_allocations(payment_id);
+      CREATE INDEX IF NOT EXISTS idx_alloc_bill    ON payment_allocations(bill_id);
+
+      CREATE TABLE IF NOT EXISTS charge_account_map (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        charge_name  TEXT NOT NULL UNIQUE,
+        account_code TEXT NOT NULL
+      );
+    `);
+
+    // Seed default mappings
+    const insertMap = db.prepare(`
+      INSERT OR IGNORE INTO charge_account_map (charge_name, account_code) VALUES (?, ?)
+    `);
+    insertMap.run('Monthly Contribution',    '4000');
+    insertMap.run('Base Contribution',       '4000');
+    insertMap.run('Monthly Tenant Challan',  '4004');
+    insertMap.run('Mosque Contribution',     '4001');
+    insertMap.run('Mosque Fund',             '4001');
+    insertMap.run('Garbage Collection',      '4002');
+    insertMap.run('Garbage Charges',         '4002');
+    insertMap.run('Aquifer Contribution',    '4003');
+    insertMap.run('Aquifer Charges',         '4003');
+    insertMap.run('Per Extra Floor',         '4000');
+
+    // Also seed new fund accounts if not already present
+    const insertAcc = db.prepare(`
+      INSERT OR IGNORE INTO accounts (account_code, account_name, account_type, normal_balance)
+      VALUES (?, ?, 'revenue', 'credit')
+    `);
+    insertAcc.run('4001', 'Mosque Fund Collections');
+    insertAcc.run('4002', 'Garbage Fund Collections');
+    insertAcc.run('4003', 'Aquifer Fund Collections');
+    insertAcc.run('4004', 'Tenant Challan Income');
+
+    db.prepare(`UPDATE settings SET value = '15' WHERE key = 'schema_version'`).run();
+    currentVersion = 15;
+  }
 }

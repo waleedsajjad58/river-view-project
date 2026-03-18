@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Search, ChevronDown, ChevronRight, Printer, FileDown } from 'lucide-react'
+import { exportExcelFile } from '../utils/exportExcel'
 
 const ipc = (window as any).ipcRenderer
 const fmt = (n: number) => (n || 0).toLocaleString()
@@ -96,29 +97,18 @@ function printJournalEntries(entries: any[], startDate: string, endDate: string)
     if (ipc) ipc.invoke('db:print-html-report', html)
 }
 
-function exportJournalCSV(entries: any[], startDate: string, endDate: string) {
+async function exportJournalExcel(entries: any[], startDate: string, endDate: string) {
     const refLabel: Record<string, string> = {
         payment: 'Payment', expenditure: 'Expenditure',
         expenditure_reversal: 'Reversal', manual: 'Manual', bank_deposit: 'Bank Deposit',
     }
-    const esc = (v: string) => `"${(v || '').replace(/"/g, '""')}"`
 
-    const rows: string[][] = []
-
-    // Title rows
-    rows.push(['River View Cooperative Housing Society Ltd.'])
-    rows.push([`Journal Entries — ${startDate} to ${endDate}`])
-    rows.push([`Generated: ${new Date().toLocaleDateString('en-PK')}`, '', '', '', '', `Entries: ${entries.length}`])
-    rows.push([]) // blank separator
-
-    // Header
-    rows.push(['Date', 'Voucher No.', 'Type', 'Description', 'Account Code', 'Account Name', 'Debit (Rs.)', 'Credit (Rs.)'])
+    const rows: (string | number)[][] = []
 
     let grandDr = 0, grandCr = 0
 
     for (const e of entries) {
         const type = refLabel[e.reference_type] || (e.reference_type || '')
-        // Entry header row
         rows.push([
             e.entry_date,
             e.voucher_number || '',
@@ -126,7 +116,6 @@ function exportJournalCSV(entries: any[], startDate: string, endDate: string) {
             e.description || '',
             '', '', '', '',
         ])
-        // Line items
         for (const l of (e.lines || [])) {
             grandDr += (l.debit || 0)
             grandCr += (l.credit || 0)
@@ -140,19 +129,19 @@ function exportJournalCSV(entries: any[], startDate: string, endDate: string) {
         }
     }
 
-    // Blank + totals
     rows.push([])
-    rows.push(['', '', '', 'TOTALS', '', '', String(grandDr), String(grandCr)])
+    rows.push(['', '', '', 'TOTALS', '', '', grandDr, grandCr])
 
-    const csv = rows.map(r => r.map(c => esc(String(c))).join(',')).join('\r\n')
-    const BOM = '\uFEFF'
-    const blob = new Blob([BOM + csv], { type: 'text/csv;charset=utf-8;' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `journal-entries-${startDate}-to-${endDate}.csv`
-    a.click()
-    URL.revokeObjectURL(url)
+    await exportExcelFile({
+        fileName: `journal-entries-${startDate}-to-${endDate}`,
+        sheetName: 'Journal Entries',
+        title: 'River View Cooperative Housing Society Ltd.',
+        subtitle: `Journal Entries - ${startDate} to ${endDate}`,
+        meta: [`Generated: ${new Date().toLocaleDateString('en-PK')} | Entries: ${entries.length}`],
+        headers: ['Date', 'Voucher No.', 'Type', 'Description', 'Account Code', 'Account Name', 'Debit (Rs.)', 'Credit (Rs.)'],
+        rows,
+        numericColumns: [7, 8],
+    })
 }
 
 export default function JournalEntriesPage() {
@@ -226,8 +215,8 @@ export default function JournalEntriesPage() {
                     <input type="date" value={endDate}   onChange={e => setEndDate(e.target.value)} />
                     {filtered.length > 0 && (
                         <>
-                        <button className="btn btn-ghost" onClick={() => exportJournalCSV(filtered, startDate, endDate)}>
-                            <FileDown size={15} /> Export CSV
+                        <button className="btn btn-ghost" onClick={() => exportJournalExcel(filtered, startDate, endDate)}>
+                            <FileDown size={15} /> Export Excel
                         </button>
                         <button className="btn btn-ghost" onClick={() => printJournalEntries(filtered, startDate, endDate)}>
                             <Printer size={15} /> Print

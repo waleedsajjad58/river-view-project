@@ -591,6 +591,12 @@ body {
   border-bottom: none;
 }
 
+.billing-page .data-table th,
+.billing-page .data-table td {
+  padding: 0.75rem 1rem;
+  height: auto;
+}
+
 .data-table .td-mono {
   font-family: var(--font-mono);
   font-size: 12.5px;

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { Plus, X, RotateCcw, Download, Search, Check, AlertTriangle, ChevronDown } from 'lucide-react'
+import { Plus, X, RotateCcw, Download, Search, Check, AlertTriangle } from 'lucide-react'
 
 const ipc = (window as any).ipcRenderer
 const fmt = (n: number) => `Rs. ${(n || 0).toLocaleString()}`
@@ -14,6 +14,33 @@ const BUILTIN_CATEGORIES = [
     'Security',
     'Cleaning',
     'Bank Charges',
+    'Electricity Bill Tube-well',
+    'Electricity Bill Streetlight',
+    'Electricity Bill Office',
+    'Telephone Bill Office',
+    'Telephone Bill Security',
+    'Repair & Maintenance Electricity Equipments',
+    'Repair & Maintenance Machinery & Equipments',
+    'Repair & Maintenance Office & Equipments',
+    'Advertisement (AGM)',
+    'Books & Periodicals & Newspapers',
+    'Oil & Lubricants Expenses',
+    'Post & Telegram Contribution',
+    'Printing & Stationery Contribution',
+    'Audit fee',
+    'Professional fee',
+    'Punjab Employees Social Security',
+    'Travelling & Conveyance Contribution',
+    'Tree Plantation',
+    'Entertainment',
+    'Entertainment AGM',
+    'Repair & Maintenance of Building/Boundary wall',
+    'Maintenance of Water Pipe Line',
+    'Maintenance of Sewerage Pipeline/Gutters',
+    'Repair & Maintenance of Internal Roads',
+    'Miscellaneous Expenses',
+    'Unexpected Expenses',
+    'Total Expenditure',
     'Other',
 ]
 
@@ -57,7 +84,7 @@ function PanelShell({ width=480, children }: { width?:number; children:React.Rea
 
 // ── Inline slide-down form (not a modal) ─────────────────────
 function ExpenseForm({
-    accounts, onSaved, onCancel
+    onSaved, onCancel
 }: { accounts: any[], onSaved: () => void, onCancel: () => void }) {
     const [f, setF] = useState({ ...empty })
     const [cashBalance, setCashBalance] = useState(0)
@@ -444,10 +471,10 @@ export default function ExpenditurePage() {
                         {allCats.map(c => <option key={c} value={c}>{c}</option>)}
                     </select>
                     <button className="btn btn-ghost" onClick={async () => {
-                        const r = await ipc.invoke('db:export-csv', 'expenditures')
+                        const r = await ipc.invoke('db:export-spreadsheet', 'expenditures')
                         if (r.success) showSuccess('Exported successfully')
                     }}>
-                        <Download size={15} /> Export
+                        <Download size={15} /> Export Excel
                     </button>
                     <button className="btn btn-primary"
                         onClick={() => setShowForm(s => !s)}>

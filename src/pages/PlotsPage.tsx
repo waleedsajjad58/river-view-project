@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import {
     Plus, X, Search, Home, User, ArrowRightLeft, History,
-    Check, Trash2, Edit2, Printer, CreditCard, FileText
+    Check, Trash2, Edit2, Printer, CreditCard, FileText, RefreshCw
 } from 'lucide-react'
 
 const ipc = (window as any).ipcRenderer
@@ -222,19 +222,23 @@ function PaymentPanel({ bill, detail, onClose, onSaved }: {
 function PlotStatement({ plotId, onPaymentSaved }: { plotId: number, onPaymentSaved: () => void }) {
     const [data, setData] = useState<any>(null)
     const [loading, setLoading] = useState(true)
+    const [refreshing, setRefreshing] = useState(false)
     const [payBill, setPayBill] = useState<any>(null)
     const [payDetail, setPayDetail] = useState<any>(null)
     const [filter, setFilter] = useState<'all' | 'monthly' | 'special' | 'general' | 'unpaid'>('all')
 
-    const load = useCallback(async () => {
+    const loadStatement = useCallback(async () => {
         if (!ipc || !plotId) return
-        setLoading(true)
+        setRefreshing(true)
         try { setData(await ipc.invoke('db:get-plot-statement', plotId)) }
         catch (e) { console.error(e) }
-        finally { setLoading(false) }
+        finally {
+            setLoading(false)
+            setRefreshing(false)
+        }
     }, [plotId])
 
-    useEffect(() => { load() }, [load])
+    useEffect(() => { loadStatement() }, [loadStatement])
 
     const openPayment = async (bill: any) => {
         if (bill.status === 'paid') return
@@ -340,11 +344,22 @@ function PlotStatement({ plotId, onPaymentSaved }: { plotId: number, onPaymentSa
                         </button>
                     ))}
                 </div>
-                {summary.unpaidCount > 0 && (
-                    <button className="btn btn-ghost btn-sm" onClick={handlePrintUnpaid}>
-                        <Printer size={12} /> Print Unpaid
+                <div style={{ display: 'flex', gap: 8 }}>
+                    <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={loadStatement}
+                        disabled={refreshing}
+                        title="Refresh statement"
+                    >
+                        <RefreshCw size={14} className={refreshing ? 'spin' : ''} />
+                        {refreshing ? 'Refreshing...' : 'Refresh'}
                     </button>
-                )}
+                    {summary.unpaidCount > 0 && (
+                        <button className="btn btn-ghost btn-sm" onClick={handlePrintUnpaid}>
+                            <Printer size={12} /> Print Unpaid
+                        </button>
+                    )}
+                </div>
             </div>
 
             {/* ── Bills table ── */}
@@ -389,12 +404,12 @@ function PlotStatement({ plotId, onPaymentSaved }: { plotId: number, onPaymentSa
                                     {b.amount_paid > 0 ? b.amount_paid.toLocaleString() : '—'}
                                 </td>
                                 <td className="td-mono"
-                                    style={{ color: b.balance_due > 0 ? 'var(--c-overdue)' : 'var(--t-faint)' }}>
-                                    {b.balance_due > 0 ? b.balance_due.toLocaleString() : '—'}
+                                    style={{ color: (b.actual_balance ?? b.balance_due) > 0 ? 'var(--c-overdue)' : 'var(--t-faint)' }}>
+                                    {(b.actual_balance ?? b.balance_due) > 0 ? (b.actual_balance ?? b.balance_due).toLocaleString() : '—'}
                                 </td>
                                 <td><StatusBadge status={b.status} /></td>
                                 <td>
-                                    {b.status !== 'paid' && (
+                                    {(b.actual_balance ?? b.balance_due) > 0.01 && b.status !== 'paid' && (
                                         <button className="btn btn-ghost btn-sm"
                                             style={{ fontSize: 11, padding: '3px 8px', color: 'var(--accent)' }}
                                             onClick={() => openPayment(b)}>
@@ -422,7 +437,7 @@ function PlotStatement({ plotId, onPaymentSaved }: { plotId: number, onPaymentSa
                                     {displayed.reduce((s: number, b: any) => s + (b.amount_paid || 0), 0).toLocaleString()}
                                 </td>
                                 <td className="td-mono" style={{ fontWeight: 700, fontSize: 13, color: 'var(--c-overdue)' }}>
-                                    {displayed.reduce((s: number, b: any) => s + (b.balance_due || 0), 0).toLocaleString()}
+                                    {displayed.reduce((s: number, b: any) => s + ((b.actual_balance ?? b.balance_due) || 0), 0).toLocaleString()}
                                 </td>
                                 <td /><td />
                             </tr>
@@ -435,7 +450,7 @@ function PlotStatement({ plotId, onPaymentSaved }: { plotId: number, onPaymentSa
                 <PaymentPanel
                     bill={payBill} detail={payDetail}
                     onClose={() => { setPayBill(null); setPayDetail(null) }}
-                    onSaved={() => { load(); onPaymentSaved() }}
+                    onSaved={() => { loadStatement(); onPaymentSaved() }}
                 />
             )}
         </div>

@@ -166,8 +166,8 @@ export function generateTransferSlipHTML({ date, amount, notes }) {
   @import url('https://fonts.googleapis.com/css2?family=EB+Garamond:wght@400;600;700&family=Source+Sans+3:wght@400;600;700&display=swap');
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: 'Source Sans 3', Arial, sans-serif; font-size: 11px; background: #f0ece4; padding: 10px; color: #111; }
-  .slip { width: 740px; margin: 0 auto 6px; border: 1.5px solid #999; background: #fff; position: relative; page-break-inside: avoid; }
-  .copy-label { position: absolute; right: -26px; top: 50%; transform: translateY(-50%) rotate(90deg); font-size: 9px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; background: #1a4a7a; color: #fff; padding: 3px 10px; white-space: nowrap; border-radius: 0 0 3px 3px; }
+  .slip { width: 740px; margin: 0 auto 6px; border: 1.5px solid #999; background: #fff; position: relative; page-break-inside: avoid; padding-right: 30px; overflow: hidden; }
+  .copy-label { position: absolute; right: 3px; top: 50%; transform: translateY(-50%) rotate(90deg); transform-origin: center; font-size: 9px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; background: #1a4a7a; color: #fff; padding: 3px 10px; white-space: nowrap; border-radius: 0 0 3px 3px; z-index: 2; }
   .bill-header { display: flex; align-items: center; background: #d0dff0; border-bottom: 1.5px solid #999; padding: 6px 10px; gap: 10px; }
   .society-name { flex: 1; text-align: center; font-family: 'EB Garamond', Georgia, serif; font-size: 20px; font-weight: 700; color: #1a2e5a; letter-spacing: 0.5px; }
   .bill-body { display: grid; grid-template-columns: 260px 1fr; min-height: 140px; }
@@ -175,11 +175,11 @@ export function generateTransferSlipHTML({ date, amount, notes }) {
   .info-row { display: flex; gap: 4px; line-height: 1.7; }
   .info-label { font-weight: 700; white-space: nowrap; min-width: 100px; }
   .info-value { color: #222; }
-  .right-panel { padding: 0; }
+  .right-panel { padding: 0 10px 0 0; }
   .voucher-table { width: 100%; border-collapse: collapse; }
   .voucher-table th { background: #1a4a7a; color: #fff; text-align: center; padding: 5px 8px; font-size: 11px; letter-spacing: 0.4px; }
   .voucher-table td { padding: 4px 8px; border-bottom: 1px solid #e0e0e0; vertical-align: middle; line-height: 1.6; }
-  .voucher-table td:last-child { text-align: right; font-variant-numeric: tabular-nums; min-width: 80px; }
+  .voucher-table td:last-child { text-align: right; font-variant-numeric: tabular-nums; min-width: 110px; padding-right: 14px; white-space: nowrap; }
   .voucher-table tr.amount-row td { font-weight: 700; font-size: 13px; background: #d0dff0; border-top: 1.5px solid #1a4a7a; }
   .sig-row { display: flex; justify-content: space-between; padding: 20px 16px 8px; }
   .sig { text-align: center; width: 140px; }

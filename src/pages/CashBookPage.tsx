@@ -1,9 +1,132 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Search } from 'lucide-react'
+import { Search, Printer, FileDown } from 'lucide-react'
+import { exportExcelFile } from '../utils/exportExcel'
 
 const ipc = (window as any).ipcRenderer
 
 function fmt(n: number) { return (n || 0).toLocaleString() }
+
+function printCashBook(entries: any[], startDate: string, endDate: string) {
+    const withBalance = computeRunning(entries)
+
+    const totalCashIn = entries.reduce((s, e) => s + (e.cash_in || 0), 0)
+    const totalCashOut = entries.reduce((s, e) => s + (e.cash_out || 0), 0)
+    const totalBankIn = entries.reduce((s, e) => s + (e.bank_in || 0), 0)
+    const totalBankOut = entries.reduce((s, e) => s + (e.bank_out || 0), 0)
+    const closingCash = totalCashIn - totalCashOut
+    const closingBank = totalBankIn - totalBankOut
+
+    const rows = withBalance.map((e: any) => `
+        <tr>
+            <td>${e.entry_date || ''}</td>
+            <td>${e.description || ''}${e.receipt_number ? ` <span class="muted">#${e.receipt_number}</span>` : ''}</td>
+            <td class="num in">${e.cash_in > 0 ? fmt(e.cash_in) : '—'}</td>
+            <td class="num out">${e.cash_out > 0 ? fmt(e.cash_out) : '—'}</td>
+            <td class="num in">${e.bank_in > 0 ? fmt(e.bank_in) : '—'}</td>
+            <td class="num out">${e.bank_out > 0 ? fmt(e.bank_out) : '—'}</td>
+            <td class="num">${fmt(e.cash_balance)}</td>
+            <td class="num">${fmt(e.bank_balance)}</td>
+        </tr>
+    `).join('')
+
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Cash Book</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: Arial, sans-serif; font-size: 11px; color: #111; padding: 16px; }
+        h2 { font-size: 15px; text-align: center; margin-bottom: 2px; color: #1a2e5a; }
+        .sub { text-align: center; font-size: 10px; color: #555; margin-bottom: 10px; }
+        .meta { display: flex; justify-content: space-between; font-size: 10px; color: #666; margin-bottom: 10px; padding: 4px 0; border-bottom: 1px solid #ddd; }
+        table { width: 100%; border-collapse: collapse; }
+        thead th {
+            background: #1a4a7a; color: #fff; padding: 5px 7px;
+            font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
+            border: 1px solid #0e3060;
+        }
+        tbody td { border-bottom: 1px dotted #d8e0ec; padding: 4px 7px; font-size: 10.5px; }
+        td.num { text-align: right; font-family: 'Courier New', monospace; }
+        td.in { color: #15803d; }
+        td.out { color: #b91c1c; }
+        .muted { color: #777; font-size: 10px; font-family: 'Courier New', monospace; }
+        tfoot td { background: #1a4a7a; color: #fff; font-weight: 700; padding: 6px 7px; border-top: 2px solid #0e3060; }
+        .numf { text-align: right; font-family: 'Courier New', monospace; }
+        @media print { body { padding: 0; } }
+    </style>
+    </head><body>
+    <h2>River View Cooperative Housing Society Ltd.</h2>
+    <div class="sub">Cash Book — ${startDate} to ${endDate}</div>
+    <div class="meta"><span>${entries.length} entries</span><span>Printed: ${new Date().toLocaleDateString('en-PK')}</span></div>
+    <table>
+      <thead><tr>
+        <th style="width:92px">Date</th>
+        <th>Description</th>
+        <th style="width:84px">Cash In</th>
+        <th style="width:84px">Cash Out</th>
+        <th style="width:84px">Bank In</th>
+        <th style="width:84px">Bank Out</th>
+        <th style="width:90px">Cash Bal.</th>
+        <th style="width:90px">Bank Bal.</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+      <tfoot><tr>
+        <td colspan="2" style="letter-spacing:0.05em;font-size:10px;">TOTALS / CLOSING</td>
+        <td class="numf">${fmt(totalCashIn)}</td>
+        <td class="numf">${fmt(totalCashOut)}</td>
+        <td class="numf">${fmt(totalBankIn)}</td>
+        <td class="numf">${fmt(totalBankOut)}</td>
+        <td class="numf">${fmt(closingCash)}</td>
+        <td class="numf">${fmt(closingBank)}</td>
+      </tr></tfoot>
+    </table>
+    <script>window.onload = () => { window.print(); }<\/script>
+    </body></html>`
+
+    if (ipc) ipc.invoke('db:print-html-report', html)
+}
+
+async function exportCashBookExcel(entries: any[], startDate: string, endDate: string) {
+    const withBalance = computeRunning(entries)
+
+    const totalCashIn = entries.reduce((s, e) => s + (e.cash_in || 0), 0)
+    const totalCashOut = entries.reduce((s, e) => s + (e.cash_out || 0), 0)
+    const totalBankIn = entries.reduce((s, e) => s + (e.bank_in || 0), 0)
+    const totalBankOut = entries.reduce((s, e) => s + (e.bank_out || 0), 0)
+    const closingCash = totalCashIn - totalCashOut
+    const closingBank = totalBankIn - totalBankOut
+
+    const rows: (string | number)[][] = withBalance.map((e: any) => ([
+        e.entry_date || '',
+        `${e.description || ''}${e.receipt_number ? ` #${e.receipt_number}` : ''}`,
+        e.cash_in || 0,
+        e.cash_out || 0,
+        e.bank_in || 0,
+        e.bank_out || 0,
+        e.cash_balance || 0,
+        e.bank_balance || 0,
+    ]))
+
+    rows.push([])
+    rows.push([
+        '',
+        'TOTALS / CLOSING',
+        totalCashIn,
+        totalCashOut,
+        totalBankIn,
+        totalBankOut,
+        closingCash,
+        closingBank,
+    ])
+
+    await exportExcelFile({
+        fileName: `cash-book-${startDate}-to-${endDate}`,
+        sheetName: 'Cash Book',
+        title: 'River View Cooperative Housing Society Ltd.',
+        subtitle: `Cash Book - ${startDate} to ${endDate}`,
+        meta: [`Generated: ${new Date().toLocaleDateString('en-PK')} | Entries: ${entries.length}`],
+        headers: ['Date', 'Description', 'Cash In', 'Cash Out', 'Bank In', 'Bank Out', 'Cash Balance', 'Bank Balance'],
+        rows,
+        numericColumns: [3, 4, 5, 6, 7, 8],
+    })
+}
 
 // Running cash and bank totals from a list of entries
 function computeRunning(entries: any[]) {
@@ -81,6 +204,16 @@ export default function CashBookPage() {
                 <div className="header-actions">
                     <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} />
                     <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} />
+                    {filtered.length > 0 && (
+                        <>
+                        <button className="btn btn-ghost" onClick={() => exportCashBookExcel(filtered, startDate, endDate)}>
+                            <FileDown size={15} /> Export Excel
+                        </button>
+                        <button className="btn btn-ghost" onClick={() => printCashBook(filtered, startDate, endDate)}>
+                            <Printer size={15} /> Print
+                        </button>
+                        </>
+                    )}
                 </div>
             </div>
 
