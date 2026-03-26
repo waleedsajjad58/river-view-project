@@ -1,0 +1,367 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Challan</title>
+    <style>
+        /* A4 Page Layout */
+        @page { size: A4; margin: 4mm; }
+        body { 
+            font-family: 'Segoe UI', Arial, sans-serif; 
+            margin: 0; padding: 0; 
+            color: #333; 
+            font-size: 9px; /* Base font size slightly smaller */
+        }
+        
+        .page-container {
+            width: 100%;
+            height: 289mm; /* Almost full A4 height */
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-start;
+        }
+
+        .challan-copy {
+            border: 1px solid #1a4a7a;
+            position: relative;
+            height: 95mm; /* ~1/3 of page */
+            box-sizing: border-box;
+            background: #fff;
+            margin-bottom: 2mm;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .challan-copy:last-child { margin-bottom: 0; }
+
+        /* HEADER SECTION */
+        .header {
+            background-color: #1a4a7a;
+            color: white;
+            padding: 4px 8px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            height: 48px;
+            border-bottom: 2px solid #000;
+        }
+
+        .header h1 {
+            margin: 0;
+            font-size: 16px;
+            text-transform: uppercase;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+            line-height: 1.1;
+        }
+        .header small { font-size: 9px; opacity: 0.9; }
+
+        .logo-box {
+            background: white;
+            padding: 2px;
+            border-radius: 2px;
+            width: 80px;
+            height: 44px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .logo-img { 
+            max-width: 100%; 
+            max-height: 100%; 
+            object-fit: contain; 
+        }
+
+        /* CONTENT AREAS (Grid) */
+        .content-area {
+            display: flex;
+            flex: 1;
+            padding: 4px;
+        }
+
+        /* Left Column (Details) */
+        .details-col { 
+            width: 45%; 
+            border-right: 1px solid #ddd; 
+            padding-right: 6px; 
+            display: flex; 
+            flex-direction: column; 
+            gap: 2px;
+        }
+
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            border-bottom: 1px dotted #eee;
+            align-items: center;
+            line-height: 1.6;
+        }
+        .info-row:last-child { border-bottom: none; }
+        
+        .label { font-weight: 700; color: #555; width: 40%; min-width: 70px; }
+        .val { font-weight: 600; text-align: left; width: 60%; color: #000; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+        /* Right Column (Table) */
+        .table-col { 
+            width: 55%; 
+            padding-left: 6px; 
+            display: flex; 
+            flex-direction: column; 
+        }
+
+        .fees-table { width: 100%; border-collapse: collapse; font-size: 9px; }
+        .fees-table th { 
+            background: #eef2f6; 
+            text-align: left; 
+            padding: 3px; 
+            font-weight: 700;
+            border-bottom: 1.5px solid #1a4a7a;
+            color: #1a4a7a;
+            text-transform: uppercase;
+        }
+        
+        .fees-table td { 
+            padding: 2px 4px; 
+            border-bottom: 1px solid #eee; 
+            vertical-align: middle;
+        }
+
+        .fees-table .amt { 
+            text-align: right; 
+            font-weight: 600; 
+            font-family: 'Courier New', monospace; 
+            font-size: 11px;
+            width: 70px;
+        }
+
+        .fees-table .total-row td { 
+            border-top: 1.5px solid #333; 
+            font-weight: 700; 
+            background: #fdfdfd; 
+            padding-top: 4px;
+            padding-bottom: 4px;
+        }
+        
+        .fees-table .late-row td { 
+            background: #fff5f5; 
+            color: #c00; 
+            font-weight: 700;
+        }
+
+        /* Footer & Remarks */
+        .footer {
+            margin-top: auto;
+            border-top: 1px solid #ccc;
+            padding-top: 4px;
+            font-size: 9px;
+            color: #444;
+        }
+        
+        .remarks {
+            font-style: italic;
+            height: 2.8em;
+            overflow: hidden;
+            line-height: 1.2;
+            color: #555;
+            white-space: pre-wrap;
+        }
+
+        /* Special Charges Box */
+        .special-box {
+            margin-top: 4px;
+            border: 1px solid #ddd;
+            background: #fafafa;
+            padding: 2px;
+            border-radius: 2px;
+        }
+        .special-charges-table { width: 100%; font-size: 9px; border-collapse: collapse; }
+        .special-charges-table td { padding: 1px 3px; border-bottom: 1px solid #eee; }
+        .special-title { font-weight: 700; color: #b91c1c; margin-bottom: 1px; font-size: 9px; }
+
+        /* Copy Label (Vertical) */
+        .copy-label {
+            position: absolute;
+            right: 0; top: 0;
+            background: #1a4a7a;
+            color: white;
+            font-size: 9px;
+            font-weight: 700;
+            padding: 2px 6px;
+            border-bottom-left-radius: 4px;
+            text-transform: uppercase;
+        }
+
+        /* Separator Line (Dashed) */
+        .cut-line {
+            width: 100%;
+            border-top: 1px dashed #999;
+            margin: 0;
+            position: relative;
+        }
+        .cut-icon {
+            position: absolute; left: 10px; top: -6px; background: white; padding: 0 2px; font-size: 10px; color: #999;
+        }
+
+        @media print {
+            body { -webkit-print-color-adjust: exact; background: white; }
+            .challan-copy { border-color: #000; break-inside: avoid; }
+        }
+    </style>
+</head>
+<body>
+
+<div class="page-container">
+
+    <!-- Function to render a single copy -->
+    <!-- Ideally handled by JS templating, but hardcoded here for 3 copies -->
+
+    <!-- ============ BANK COPY ============ -->
+    <div class="challan-copy">
+        <div class="copy-label">BANK COPY</div>
+        <div class="header">
+            <div>
+                <h1>River View Cooperative H.S. Ltd.</h1>
+                <small>Reg No. K-1456 | Block-1, Scheme-33, Super Highway, Karachi</small>
+            </div>
+            <div class="logo-box">
+                <img src="{{LOGO_DATA_URI}}" alt="RVCHS" class="logo-img" onerror="this.onerror=null;this.src='data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MCIgaGVpZ2h0PSI0NCIgdmlld0JveD0iMCAwIDgwIDQ0Ij48cmVjdCB3aWR0aD0iODAiIGhlaWdodD0iNDQiIGZpbGw9IiNmZmYiIHN0cm9rZT0iI2NjYyIgc3Ryb2tlLXdpZHRoPSIxIi8+PHRleHQgeD0iNTAlIiB5PSI1MCUiIGRvbWluYW50LWJhc2VsaW5lPSJtaWRkbGUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM5OTkiPlJWQ0hTPC90ZXh0Pjwvc3ZnPg=='">
+            </div>
+        </div>
+        
+        <div class="content-area">
+            <div class="details-col">
+                <div class="info-row"><span class="label">Plot No:</span><span class="val" style="font-size:11px">{{PLOT_NO}}</span></div>
+                <div class="info-row"><span class="label">Member:</span><span class="val">{{MEMBER_NAME}}</span></div>
+                <div class="info-row"><span class="label">Memb #:</span><span class="val">{{MEMBERSHIP_NO}}</span></div>
+                <div class="info-row"><span class="label">Challan #:</span><span class="val">{{CHALLAN_NO}}</span></div>
+                <div class="info-row"><span class="label">Month:</span><span class="val">{{BILL_MONTH}}</span></div>
+                <div class="info-row"><span class="label">Issue Date:</span><span class="val">{{ISSUED_ON}}</span></div>
+                <div class="info-row"><span class="label">Due Date:</span><span class="val" style="color:#c00">{{DUE_DATE}}</span></div>
+                <div class="info-row"><span class="label">Paid Upto:</span><span class="val">{{PAID_UPTO}}</span></div>
+                <div class="special-box">{{SPECIAL_CHARGES_SECTION}}</div>
+            </div>
+
+            <div class="table-col">
+                <table class="fees-table">
+                    <thead><tr><th>Description</th><th style="text-align:right">Amount (Rs)</th></tr></thead>
+                    <tbody>
+                        <tr><td>Monthly Contribution</td><td class="amt">{{MONTHLY_CONTRIBUTION}}</td></tr>
+                        <tr><td>Mosque Fund</td><td class="amt">{{MOSQUE}}</td></tr>
+                        <tr><td>Garbage Charges</td><td class="amt">{{GARBAGE_CHARGES}}</td></tr>
+                        <tr><td>Aquifer Charges</td><td class="amt">{{AQUIFER_CHARGES}}</td></tr>
+                        <tr><td>Arrears</td><td class="amt">{{ARREARS}}</td></tr>
+                        <tr class="total-row"><td>Payable Within Due Date</td><td class="amt">{{PAYABLE_AMOUNT}}</td></tr>
+                        <tr class="late-row"><td>Payable After Due Date</td><td class="amt">{{PAYABLE_AFTER_DUE}}</td></tr>
+                    </tbody>
+                </table>
+                <div class="footer">
+                    <strong>Remarks:</strong>
+                    <div class="remarks">{{NOTICE_TEXT}}</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="cut-line"><span class="cut-icon">&#9986;</span></div>
+
+    <!-- ============ OFFICE COPY ============ -->
+    <div class="challan-copy">
+        <div class="copy-label">OFFICE COPY</div>
+        <div class="header">
+            <div>
+                <h1>River View Cooperative H.S. Ltd.</h1>
+                <small>Reg No. K-1456 | Block-1, Scheme-33, Super Highway, Karachi</small>
+            </div>
+            <div class="logo-box">
+                <img src="{{LOGO_DATA_URI}}" alt="RVCHS" class="logo-img" onerror="this.onerror=null;this.src='data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MCIgaGVpZ2h0PSI0NCIgdmlld0JveD0iMCAwIDgwIDQ0Ij48cmVjdCB3aWR0aD0iODAiIGhlaWdodD0iNDQiIGZpbGw9IiNmZmYiIHN0cm9rZT0iI2NjYyIgc3Ryb2tlLXdpZHRoPSIxIi8+PHRleHQgeD0iNTAlIiB5PSI1MCUiIGRvbWluYW50LWJhc2VsaW5lPSJtaWRkbGUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM5OTkiPlJWQ0hTPC90ZXh0Pjwvc3ZnPg=='">
+            </div>
+        </div>
+        
+        <div class="content-area">
+            <div class="details-col">
+                <div class="info-row"><span class="label">Plot No:</span><span class="val" style="font-size:11px">{{PLOT_NO}}</span></div>
+                <div class="info-row"><span class="label">Member:</span><span class="val">{{MEMBER_NAME}}</span></div>
+                <div class="info-row"><span class="label">Memb #:</span><span class="val">{{MEMBERSHIP_NO}}</span></div>
+                <div class="info-row"><span class="label">Challan #:</span><span class="val">{{CHALLAN_NO}}</span></div>
+                <div class="info-row"><span class="label">Month:</span><span class="val">{{BILL_MONTH}}</span></div>
+                <div class="info-row"><span class="label">Issue Date:</span><span class="val">{{ISSUED_ON}}</span></div>
+                <div class="info-row"><span class="label">Due Date:</span><span class="val" style="color:#c00">{{DUE_DATE}}</span></div>
+                <div class="info-row"><span class="label">Paid Upto:</span><span class="val">{{PAID_UPTO}}</span></div>
+                <div class="special-box">{{SPECIAL_CHARGES_SECTION}}</div>
+            </div>
+
+            <div class="table-col">
+                <table class="fees-table">
+                     <thead><tr><th>Description</th><th style="text-align:right">Amount (Rs)</th></tr></thead>
+                    <tbody>
+                        <tr><td>Monthly Contribution</td><td class="amt">{{MONTHLY_CONTRIBUTION}}</td></tr>
+                        <tr><td>Mosque Fund</td><td class="amt">{{MOSQUE}}</td></tr>
+                        <tr><td>Garbage Charges</td><td class="amt">{{GARBAGE_CHARGES}}</td></tr>
+                        <tr><td>Aquifer Charges</td><td class="amt">{{AQUIFER_CHARGES}}</td></tr>
+                        <tr><td>Arrears</td><td class="amt">{{ARREARS}}</td></tr>
+                        <tr class="total-row"><td>Within Due Date</td><td class="amt">{{PAYABLE_AMOUNT}}</td></tr>
+                        <tr class="late-row"><td>After Due Date</td><td class="amt">{{PAYABLE_AFTER_DUE}}</td></tr>
+                    </tbody>
+                </table>
+                <div class="footer">
+                    <strong>Remarks:</strong>
+                    <div class="remarks">{{NOTICE_TEXT}}</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="cut-line"><span class="cut-icon">&#9986;</span></div>
+
+    <!-- ============ MEMBER COPY ============ -->
+    <div class="challan-copy">
+        <div class="copy-label">MEMBER COPY</div>
+        <div class="header">
+            <div>
+                <h1>River View Cooperative H.S. Ltd.</h1>
+                <small>Reg No. K-1456 | Block-1, Scheme-33, Super Highway, Karachi</small>
+            </div>
+            <div class="logo-box">
+                <img src="{{LOGO_DATA_URI}}" alt="RVCHS" class="logo-img" onerror="this.onerror=null;this.src='data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MCIgaGVpZ2h0PSI0NCIgdmlld0JveD0iMCAwIDgwIDQ0Ij48cmVjdCB3aWR0aD0iODAiIGhlaWdodD0iNDQiIGZpbGw9IiNmZmYiIHN0cm9rZT0iI2NjYyIgc3Ryb2tlLXdpZHRoPSIxIi8+PHRleHQgeD0iNTAlIiB5PSI1MCUiIGRvbWluYW50LWJhc2VsaW5lPSJtaWRkbGUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM5OTkiPlJWQ0hTPC90ZXh0Pjwvc3ZnPg=='">
+            </div>
+        </div>
+        
+        <div class="content-area">
+            <div class="details-col">
+                <div class="info-row"><span class="label">Plot No:</span><span class="val" style="font-size:11px">{{PLOT_NO}}</span></div>
+                <div class="info-row"><span class="label">Member:</span><span class="val">{{MEMBER_NAME}}</span></div>
+                <div class="info-row"><span class="label">Memb #:</span><span class="val">{{MEMBERSHIP_NO}}</span></div>
+                <div class="info-row"><span class="label">Challan #:</span><span class="val">{{CHALLAN_NO}}</span></div>
+                <div class="info-row"><span class="label">Month:</span><span class="val">{{BILL_MONTH}}</span></div>
+                <div class="info-row"><span class="label">Issue Date:</span><span class="val">{{ISSUED_ON}}</span></div>
+                <div class="info-row"><span class="label">Due Date:</span><span class="val" style="color:#c00">{{DUE_DATE}}</span></div>
+                <div class="info-row"><span class="label">Paid Upto:</span><span class="val">{{PAID_UPTO}}</span></div>
+                <div class="special-box">{{SPECIAL_CHARGES_SECTION}}</div>
+            </div>
+
+            <div class="table-col">
+                <table class="fees-table">
+                     <thead><tr><th>Description</th><th style="text-align:right">Amount (Rs)</th></tr></thead>
+                    <tbody>
+                        <tr><td>Monthly Contribution</td><td class="amt">{{MONTHLY_CONTRIBUTION}}</td></tr>
+                        <tr><td>Mosque Fund</td><td class="amt">{{MOSQUE}}</td></tr>
+                        <tr><td>Garbage Charges</td><td class="amt">{{GARBAGE_CHARGES}}</td></tr>
+                        <tr><td>Aquifer Charges</td><td class="amt">{{AQUIFER_CHARGES}}</td></tr>
+                        <tr><td>Arrears</td><td class="amt">{{ARREARS}}</td></tr>
+                        <tr class="total-row"><td>Within Due Date</td><td class="amt">{{PAYABLE_AMOUNT}}</td></tr>
+                        <tr class="late-row"><td>After Due Date</td><td class="amt">{{PAYABLE_AFTER_DUE}}</td></tr>
+                    </tbody>
+                </table>
+                <div class="footer">
+                    <strong>Remarks:</strong>
+                    <div class="remarks">{{NOTICE_TEXT}}</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+</div>
+
+</body>
+</html>
