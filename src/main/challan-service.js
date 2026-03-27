@@ -47,18 +47,22 @@ function pick(items, pattern) {
 function normalizeChargeLabel(chargeName) {
   const raw = String(chargeName || '').trim();
   if (!raw) return 'Charge';
+  if (/monthly tenant challan/i.test(raw)) return 'Monthly Tenant Challan';
   if (/monthly contribution|base contribution/i.test(raw)) return 'Monthly Contribution';
   if (/mosque/i.test(raw)) return 'Mosque Fund';
   if (/garbage/i.test(raw)) return 'Garbage Charges';
   if (/aquifer/i.test(raw)) return 'Aquifer Charges';
+  if (/late fee/i.test(raw)) return 'Late Fee';
   return raw;
 }
 
 function chargeSortPriority(label) {
+  if (/^monthly tenant challan$/i.test(label)) return 1;
   if (/^monthly contribution$/i.test(label)) return 1;
   if (/^mosque fund$/i.test(label)) return 2;
   if (/^garbage charges$/i.test(label)) return 3;
   if (/^aquifer charges$/i.test(label)) return 4;
+  if (/^late fee$/i.test(label)) return 5;
   return 50;
 }
 
@@ -111,9 +115,32 @@ export function generateChallanHTML(billId, customAmount = null, printRemarks = 
         SELECT
             b.*,
             p.plot_number,
-            COALESCE(m.member_id, owner_m.member_id) AS member_code,
-            COALESCE(m.name, owner_m.name) AS member_name,
+        COALESCE(
+          m.member_id,
+          (
+            SELECT mo.member_id
+            FROM plot_ownership po
+            JOIN members mo ON mo.id = po.member_id
+            WHERE po.plot_id = b.plot_id
+              AND (po.end_date IS NULL OR po.end_date = '')
+            ORDER BY po.start_date DESC, po.id DESC
+            LIMIT 1
+          )
+        ) AS member_code,
+        COALESCE(
+          m.name,
+          (
+            SELECT mo.name
+            FROM plot_ownership po
+            JOIN members mo ON mo.id = po.member_id
+            WHERE po.plot_id = b.plot_id
+              AND (po.end_date IS NULL OR po.end_date = '')
+            ORDER BY po.start_date DESC, po.id DESC
+            LIMIT 1
+          )
+        ) AS member_name,
             t.name AS tenant_name,
+          t.tenant_id AS tenant_code,
             (SELECT MAX(b2.billing_month) FROM bills b2
              WHERE b2.plot_id = b.plot_id AND b2.status = 'paid' AND b2.is_deleted = 0) AS paid_upto,
             (SELECT MAX(b3.billing_month) FROM bills b3
@@ -122,13 +149,65 @@ export function generateChallanHTML(billId, customAmount = null, printRemarks = 
         FROM bills b
         LEFT JOIN plots p ON p.id = b.plot_id
         LEFT JOIN members m ON m.id = b.member_id
-        LEFT JOIN plot_ownership owner_po ON owner_po.plot_id = b.plot_id AND owner_po.end_date IS NULL
-        LEFT JOIN members owner_m ON owner_m.id = owner_po.member_id
         LEFT JOIN tenants t ON t.id = b.tenant_id
         WHERE b.id = ? AND b.is_deleted = 0
     `).get(billId);
 
     if (!row) throw new Error('Bill not found: ' + billId);
+
+    // Resolve member details with simple fail-safe fallbacks:
+    // 1) direct bill member, 2) latest plot owner, 3) formatted numeric id.
+    let resolvedMemberName = String(row.member_name || '').trim();
+    let resolvedMemberCode = String(row.member_code || '').trim();
+
+    if (!resolvedMemberName || !resolvedMemberCode) {
+      let fallbackMember = null;
+
+      if (row.member_id) {
+        fallbackMember = db.prepare('SELECT id, name, member_id FROM members WHERE id = ?').get(row.member_id);
+      }
+
+      if ((!fallbackMember || !fallbackMember.name || !fallbackMember.member_id) && row.plot_id) {
+        fallbackMember = db.prepare(`
+          SELECT m.id, m.name, m.member_id
+          FROM plot_ownership po
+          JOIN members m ON m.id = po.member_id
+          WHERE po.plot_id = ?
+          ORDER BY
+            CASE WHEN po.end_date IS NULL OR po.end_date = '' THEN 0 ELSE 1 END,
+            po.start_date DESC,
+            po.id DESC
+          LIMIT 1
+        `).get(row.plot_id);
+      }
+
+      if (!resolvedMemberName && fallbackMember?.name) {
+        resolvedMemberName = String(fallbackMember.name).trim();
+      }
+
+      if (!resolvedMemberCode) {
+        if (fallbackMember?.member_id) {
+          resolvedMemberCode = String(fallbackMember.member_id).trim();
+        } else if (fallbackMember?.id) {
+          resolvedMemberCode = `MEM-${String(fallbackMember.id).padStart(5, '0')}`;
+        } else if (row.member_id) {
+          resolvedMemberCode = `MEM-${String(row.member_id).padStart(5, '0')}`;
+        }
+      }
+    }
+
+    // Final fallback for tenant bills where owner mapping is missing.
+    if (row.bill_type === 'tenant') {
+      if (!resolvedMemberName && row.tenant_name) {
+        resolvedMemberName = String(row.tenant_name).trim();
+      }
+      if (!resolvedMemberCode && row.tenant_code) {
+        resolvedMemberCode = String(row.tenant_code).trim();
+      }
+    }
+
+    if (!resolvedMemberName) resolvedMemberName = 'Unassigned';
+    if (!resolvedMemberCode) resolvedMemberCode = 'N/A';
 
     const items = db.prepare('SELECT charge_name, amount FROM bill_items WHERE bill_id = ?').all(billId);
 
@@ -161,12 +240,46 @@ export function generateChallanHTML(billId, customAmount = null, printRemarks = 
       return a.label.localeCompare(b.label);
     });
 
-    const descriptionRows = [
-      ...groupedItems.map((i) => rowHtml(escapeHtml(i.label), fmt(i.amount))),
-      Number(row.arrears || 0) > 0.009 ? rowHtml('Arrears', fmt(row.arrears)) : null,
-      rowHtml('Payable Within Due Date', payable, 'total-row'),
-      rowHtml('Payable After Due Date', fmt(payableAfterDue), 'late-row'),
-    ].filter(Boolean).join('');
+    const showArrearsRow = row.bill_type === 'monthly' && Number(row.arrears || 0) > 0.009;
+
+    const descriptionRows = (() => {
+      if (row.bill_type === 'tenant') {
+        const groupedMap = groupedItems.reduce((acc, i) => {
+          const tenantLabel = (/^monthly contribution$/i.test(i.label) || /^base contribution$/i.test(i.label))
+            ? 'Monthly Tenant Challan'
+            : i.label;
+          acc[tenantLabel] = (acc[tenantLabel] || 0) + i.amount;
+          return acc;
+        }, {});
+
+        const fixedTenantHeaders = [
+          'Monthly Tenant Challan',
+          'Mosque Fund',
+          'Garbage Charges',
+          'Aquifer Charges',
+          'Late Fee',
+        ];
+
+        const fixedRows = fixedTenantHeaders.map((label) => rowHtml(label, fmt(groupedMap[label] || 0)));
+        const extraRows = groupedItems
+          .filter((i) => !fixedTenantHeaders.includes(i.label) && !/^monthly contribution$/i.test(i.label) && !/^base contribution$/i.test(i.label))
+          .map((i) => rowHtml(escapeHtml(i.label), fmt(i.amount)));
+
+        return [
+          ...fixedRows,
+          ...extraRows,
+          rowHtml('Payable Within Due Date', payable, 'total-row'),
+          rowHtml('Payable After Due Date', fmt(payableAfterDue), 'late-row'),
+        ].join('');
+      }
+
+      return [
+        ...groupedItems.map((i) => rowHtml(escapeHtml(i.label), fmt(i.amount))),
+        showArrearsRow ? rowHtml('Arrears', fmt(row.arrears)) : null,
+        rowHtml('Payable Within Due Date', payable, 'total-row'),
+        rowHtml('Payable After Due Date', fmt(payableAfterDue), 'late-row'),
+      ].filter(Boolean).join('');
+    })();
     const specialSection = '';
 
     const html = readFileSync(resolveTemplatePath(), 'utf8');
@@ -180,8 +293,8 @@ export function generateChallanHTML(billId, customAmount = null, printRemarks = 
 
     return html
         .replace(/\{\{PLOT_NO\}\}/g,              row.plot_number || '')
-      .replace(/\{\{MEMBERSHIP_NO\}\}/g,         row.member_code || '')
-        .replace(/\{\{MEMBER_NAME\}\}/g,           row.member_name || '')
+      .replace(/\{\{MEMBERSHIP_NO\}\}/g,         resolvedMemberCode || '')
+        .replace(/\{\{MEMBER_NAME\}\}/g,           resolvedMemberName || '')
         .replace(/\{\{TENANT_NAME\}\}/g,           row.tenant_name || '')
         .replace(/\{\{CHALLAN_NO\}\}/g,            row.bill_number || '')
         .replace(/\{\{BILL_MONTH\}\}/g,            fmtMonth(row.billing_month))

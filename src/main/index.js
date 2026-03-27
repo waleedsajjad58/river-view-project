@@ -707,7 +707,7 @@ ipcMain.handle('db:generate-monthly-bills', (_e, { billingMonth, notice }) => {
         for (const plot of plots) {
             const existing = db.prepare("SELECT id FROM bills WHERE plot_id = ? AND billing_month = ? AND bill_type = 'monthly' AND is_deleted = 0").get(plot.id, billingMonth);
             if (!existing) {
-                const owner = db.prepare('SELECT member_id FROM plot_ownership WHERE plot_id = ? AND end_date IS NULL').get(plot.id);
+                const owner = db.prepare("SELECT member_id FROM plot_ownership WHERE plot_id = ? AND (end_date IS NULL OR end_date = '') ORDER BY start_date DESC, id DESC LIMIT 1").get(plot.id);
                 const items = [];
 
                 for (const t of templates.filter(t => t.plot_type === plot.plot_type)) {
@@ -829,18 +829,90 @@ ipcMain.handle('db:generate-monthly-bills', (_e, { billingMonth, notice }) => {
             if (tenant) {
                 const existingTenantBill = db.prepare("SELECT id FROM bills WHERE plot_id = ? AND billing_month = ? AND bill_type = 'tenant' AND is_deleted = 0").get(plot.id, billingMonth);
                 if (!existingTenantBill) {
+                    const tenantItems = [];
+
+                    // Keep tenant bill structure consistent each month.
+                    tenantItems.push({ charge_name: 'Monthly Tenant Challan', amount: tenantChallanAmount });
+
+                    const templateByName = (name) =>
+                        templates.find((t) => t.plot_type === plot.plot_type && t.charge_name === name);
+
+                    const mosqueTemplate = templateByName('Mosque Contribution');
+                    const aquiferTemplate = templateByName('Aquifer Contribution');
+                    const garbageTemplate = templateByName('Garbage Collection');
+
+                    if (mosqueTemplate) tenantItems.push({ charge_name: mosqueTemplate.charge_name, amount: mosqueTemplate.amount });
+                    if (aquiferTemplate) tenantItems.push({ charge_name: aquiferTemplate.charge_name, amount: aquiferTemplate.amount });
+                    if (garbageTemplate) tenantItems.push({ charge_name: garbageTemplate.charge_name, amount: garbageTemplate.amount });
+
+                    const historicalByCharge = db.prepare(`
+                        SELECT
+                            bi.charge_name,
+                            COALESCE(SUM(
+                                CASE WHEN b.subtotal > 0
+                                    THEN bi.amount * (b.balance_due / b.subtotal)
+                                    ELSE 0
+                                END
+                            ), 0) as owed
+                        FROM bill_items bi
+                        JOIN bills b ON bi.bill_id = b.id
+                        WHERE b.tenant_id = ?
+                          AND b.bill_type = 'tenant'
+                          AND b.billing_month < ?
+                          AND b.balance_due > 0.01
+                          AND b.is_deleted = 0
+                          AND bi.charge_name NOT LIKE '%Arrears%'
+                        GROUP BY bi.charge_name
+                    `).all(tenant.id, billingMonth);
+
+                    const historicalMap = {};
+                    for (const row of historicalByCharge) {
+                        historicalMap[row.charge_name] = row.owed || 0;
+                    }
+
+                    const mergedTenantItems = tenantItems.map((item) => ({
+                        charge_name: item.charge_name,
+                        amount: item.amount + (historicalMap[item.charge_name] || 0),
+                    }));
+
+                    // Preserve old charge types by merging them into the same header list.
+                    for (const [charge_name, owed] of Object.entries(historicalMap)) {
+                        if (owed > 0.01 && !tenantItems.find((i) => i.charge_name === charge_name)) {
+                            mergedTenantItems.push({ charge_name, amount: owed });
+                        }
+                    }
+
+                    const subtotal = tenantItems.reduce((sum, i) => sum + i.amount, 0);
+                    const total = mergedTenantItems.reduce((sum, i) => sum + i.amount, 0);
+                    const arrears = Math.max(0, total - subtotal);
+
                     const billDate = billingMonth + '-01';
                     const dueDate = new Date(billDate);
                     dueDate.setDate(dueDate.getDate() + dueDays);
                     const seq = String((db.prepare('SELECT COUNT(*) as c FROM bills WHERE billing_month = ?').get(billingMonth)?.c || 0) + 1).padStart(3, '0');
                     const tenantBillResult = db.prepare(`
-                        INSERT INTO bills (bill_number, plot_id, tenant_id, bill_type, bill_date, due_date,
-                        billing_month, subtotal, total_amount, balance_due, status, notice)
-                        VALUES (?, ?, ?, 'tenant', ?, ?, ?, ?, ?, ?, 'unpaid', ?)
-                    `).run(`${prefix}${billingMonth}-${seq}-T`, plot.id, tenant.id, billDate, dueDate.toISOString().split('T')[0], billingMonth, tenantChallanAmount, tenantChallanAmount, tenantChallanAmount, notice || null);
-                    // Insert bill_item so tenant bills show charge lines in detail views
-                    db.prepare('INSERT INTO bill_items (bill_id, charge_name, amount) VALUES (?, ?, ?)')
-                        .run(tenantBillResult.lastInsertRowid, 'Monthly Tenant Challan', tenantChallanAmount);
+                        INSERT INTO bills (bill_number, plot_id, member_id, tenant_id, bill_type, bill_date, due_date,
+                        billing_month, subtotal, arrears, total_amount, balance_due, status, notice)
+                        VALUES (?, ?, ?, ?, 'tenant', ?, ?, ?, ?, ?, ?, ?, 'unpaid', ?)
+                    `).run(
+                        `${prefix}${billingMonth}-${seq}-T`,
+                        plot.id,
+                        owner?.member_id || null,
+                        tenant.id,
+                        billDate,
+                        dueDate.toISOString().split('T')[0],
+                        billingMonth,
+                        subtotal,
+                        arrears,
+                        total,
+                        total,
+                        notice || null
+                    );
+
+                    const insertTenantItem = db.prepare('INSERT INTO bill_items (bill_id, charge_name, amount) VALUES (?, ?, ?)');
+                    for (const item of mergedTenantItems) {
+                        insertTenantItem.run(tenantBillResult.lastInsertRowid, item.charge_name, item.amount);
+                    }
                     generated++;
                 }
             }
