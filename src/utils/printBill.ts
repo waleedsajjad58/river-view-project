@@ -13,7 +13,7 @@ export function populateBillHTML(template: string, data: any): string {
 
   const tokens: Record<string, string> = {
     PLOT_NO: data?.plot_no || '',
-    MEMBERSHIP_NO: data?.membership_no || '',
+    MEMBERSHIP_NO: data?.membership_no || data?.member_id || '',
     MEMBER_NAME: data?.member_name || '',
     TENANT_NAME: data?.tenant_name || '',
     CHALLAN_NO: data?.challan_no || data?.bill_number || '',

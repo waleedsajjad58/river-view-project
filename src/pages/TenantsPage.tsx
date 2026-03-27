@@ -31,17 +31,25 @@ function TenantForm({ form, onChange, plots }: { form: any, onChange: (f: any) =
                     />
                 </div>
                 <div className="form-group">
-                    <label>CNIC</label>
-                    <input type="text" value={form.cnic}
-                        onChange={e => set('cnic', e.target.value)}
-                        placeholder="35201-1234567-1"
+                    <label>Tenant ID *</label>
+                    <input type="text" value={form.tenant_id || ''}
+                        onChange={e => set('tenant_id', e.target.value)}
+                        placeholder="e.g. TEN-00001"
                         style={{ fontFamily: 'IBM Plex Mono', letterSpacing: '0.02em' }}
                     />
                 </div>
             </div>
             <div className="form-grid">
                 <div className="form-group">
-                    <label>Phone</label>
+                    <label>CNIC *</label>
+                    <input type="text" value={form.cnic}
+                        onChange={e => set('cnic', e.target.value)}
+                        placeholder="35201-1234567-1"
+                        style={{ fontFamily: 'IBM Plex Mono', letterSpacing: '0.02em' }}
+                    />
+                </div>
+                <div className="form-group">
+                    <label>Phone *</label>
                     <input type="text" value={form.phone}
                         onChange={e => set('phone', e.target.value)}
                         placeholder="0300-1234567"
@@ -62,7 +70,7 @@ function TenantForm({ form, onChange, plots }: { form: any, onChange: (f: any) =
             </div>
             <div className="form-grid">
                 <div className="form-group">
-                    <label>Start Date</label>
+                    <label>Start Date *</label>
                     <input type="date" value={form.start_date}
                         onChange={e => set('start_date', e.target.value)} />
                 </div>
@@ -277,6 +285,7 @@ function TenantInfo({ tenant }: { tenant: any }) {
     return (
         <div>
             {row('Full Name', tenant.name)}
+            {row('Tenant ID', tenant.tenant_id, true)}
             {row('CNIC', tenant.cnic, true)}
             {row('Phone', tenant.phone, true)}
             {row('Plot', tenant.plot_number ? `Plot ${tenant.plot_number}` : null)}
@@ -316,7 +325,7 @@ function TenantPanel({ tenant, onClose, onSaved, onDeleted }: {
     }, [tenant.id])
 
     const handleSave = async () => {
-        if (!form.name.trim() || !form.plot_id) return
+        if (!String(form.tenant_id || '').trim() || !form.name.trim() || !String(form.cnic || '').trim() || !String(form.phone || '').trim() || !String(form.start_date || '').trim() || !form.plot_id) return
         setSaving(true)
         try {
             await ipc.invoke('db:update-tenant', { ...form, id: tenant.id })
@@ -354,9 +363,9 @@ function TenantPanel({ tenant, onClose, onSaved, onDeleted }: {
                             <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--t-primary)', letterSpacing: '-0.01em' }}>
                                 {tenant.name}
                             </div>
-                            {tenant.plot_number && (
+                            {(tenant.tenant_id || tenant.plot_number) && (
                                 <div style={{ fontSize: 11, color: 'var(--t-faint)', fontFamily: 'IBM Plex Mono' }}>
-                                    Plot {tenant.plot_number}
+                                    {(tenant.tenant_id || '').trim() || `Plot ${tenant.plot_number}`}
                                 </div>
                             )}
                         </div>
@@ -433,7 +442,7 @@ function TenantPanel({ tenant, onClose, onSaved, onDeleted }: {
                             <>
                                 <button className="btn btn-ghost" onClick={cancelEdit}>Cancel</button>
                                 <button className="btn btn-primary" onClick={handleSave}
-                                    disabled={saving || !form.name.trim() || !form.plot_id}>
+                                    disabled={saving || !String(form.tenant_id || '').trim() || !form.name.trim() || !String(form.cnic || '').trim() || !String(form.phone || '').trim() || !String(form.start_date || '').trim() || !form.plot_id}>
                                     <Check size={14} />
                                     {saving ? 'Saving...' : 'Save Changes'}
                                 </button>
@@ -449,8 +458,8 @@ function TenantPanel({ tenant, onClose, onSaved, onDeleted }: {
 // ── Add tenant panel ──────────────────────────────────────────
 function AddTenantPanel({ onClose, onSaved }: { onClose: () => void, onSaved: () => void }) {
     const [form, setForm] = useState({
-        name: '', cnic: '', phone: '', plot_id: 0,
-        start_date: '', end_date: '', monthly_rent: 2500, notes: ''
+        tenant_id: '', name: '', cnic: '', phone: '', plot_id: 0,
+        start_date: new Date().toISOString().split('T')[0], end_date: '', monthly_rent: 2500, notes: ''
     })
     const [saving, setSaving] = useState(false)
     const [err, setErr] = useState('')
@@ -461,8 +470,12 @@ function AddTenantPanel({ onClose, onSaved }: { onClose: () => void, onSaved: ()
     }, [])
 
     const handleSave = async () => {
+        if (!form.tenant_id.trim()) { setErr('Tenant ID is required'); return }
         if (!form.name.trim()) { setErr('Name is required'); return }
+        if (!form.cnic.trim()) { setErr('CNIC is required'); return }
+        if (!form.phone.trim()) { setErr('Phone number is required'); return }
         if (!form.plot_id) { setErr('Please select a plot'); return }
+        if (!form.start_date) { setErr('Start date is required'); return }
         setSaving(true)
         try {
             await ipc.invoke('db:add-tenant', form)
@@ -492,7 +505,7 @@ function AddTenantPanel({ onClose, onSaved }: { onClose: () => void, onSaved: ()
                 <div className="panel-footer" style={{ justifyContent: 'flex-end' }}>
                     <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
                     <button className="btn btn-primary btn-lg" onClick={handleSave}
-                        disabled={saving || !form.name.trim() || !form.plot_id}>
+                        disabled={saving || !form.tenant_id.trim() || !form.name.trim() || !form.cnic.trim() || !form.phone.trim() || !form.plot_id || !form.start_date}>
                         <Check size={15} />
                         {saving ? 'Saving...' : 'Save Tenant'}
                     </button>
@@ -534,6 +547,7 @@ export default function TenantsPage() {
     const q = search.toLowerCase().replace(/[-\s]/g, '')
     const displayed = q
         ? tenants.filter(t =>
+            t.tenant_id?.replace(/[-\s]/g, '').toLowerCase().includes(q) ||
             t.name?.toLowerCase().includes(q) ||
             t.cnic?.replace(/[-\s]/g, '').toLowerCase().includes(q) ||
             t.phone?.replace(/[-\s]/g, '').toLowerCase().includes(q) ||
@@ -576,7 +590,7 @@ export default function TenantsPage() {
                         ref={searchRef}
                         value={search}
                         onChange={e => setSearch(e.target.value)}
-                        placeholder="Search by name, CNIC, phone, or plot number..."
+                        placeholder="Search by Tenant ID, name, CNIC, phone, or plot number..."
                     />
                     {search && (
                         <button
@@ -599,6 +613,7 @@ export default function TenantsPage() {
                 <table className="data-table">
                     <thead>
                         <tr>
+                            <th>Tenant ID</th>
                             <th>Name</th>
                             <th>CNIC</th>
                             <th>Phone</th>
@@ -611,12 +626,12 @@ export default function TenantsPage() {
                     </thead>
                     <tbody>
                         {loading ? (
-                            <tr><td colSpan={8} style={{
+                            <tr><td colSpan={9} style={{
                                 textAlign: 'center', padding: 36,
                                 color: 'var(--t-faint)', fontSize: 13
                             }}>Loading...</td></tr>
                         ) : displayed.length === 0 ? (
-                            <tr><td colSpan={8} style={{
+                            <tr><td colSpan={9} style={{
                                 textAlign: 'center', padding: 40,
                                 color: 'var(--t-faint)', fontSize: 13
                             }}>
@@ -628,6 +643,9 @@ export default function TenantsPage() {
                             const isActive = !t.end_date || t.end_date === '' || new Date(t.end_date) >= new Date()
                             return (
                                 <tr key={t.id} onClick={() => setSelected(t)}>
+                                    <td style={{ fontFamily: 'IBM Plex Mono', fontSize: 12, color: 'var(--t-muted)', letterSpacing: '0.01em' }}>
+                                        {t.tenant_id || '—'}
+                                    </td>
                                     <td>
                                         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                                             <div style={{

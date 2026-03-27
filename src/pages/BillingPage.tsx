@@ -396,16 +396,18 @@ function PaymentPanel({ bill, detail, onClose, onSuccess }: any) {
                 : <><CreditCard size={15}/> Post Payment</>}
             </button>
             <button type="button" className="btn btn-ghost"
-              onClick={() => {
-                const remarks = window.prompt('Optional remarks for this print (leave blank to keep saved remarks):', '')
-                if (remarks === null) return
-                ipc.invoke('db:print-challan', {
-                  billId: bill.id,
-                  amount: parseFloat(amount) || null,
-                  remarks: remarks.trim() || null,
-                })
+              onClick={async () => {
+                try {
+                  await ipc.invoke('db:print-challan', {
+                    billId: bill.id,
+                    amount: parseFloat(amount) || null,
+                    remarks: notes.trim() || null,
+                  })
+                } catch (e: any) {
+                  setError(`Failed to open challan: ${e.message || e}`)
+                }
               }}>
-              🖨 Challan
+              Challan
             </button>
             <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
           </div>

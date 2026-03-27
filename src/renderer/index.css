@@ -1,10 +1,10 @@
 /* ═══════════════════════════════════════════════════════════════
    RIVER VIEW ERP — Design System v3.0
    Theme: Dark Enterprise — Xero/Linear/Stripe precision
-   Fonts: IBM Plex Sans (UI) + IBM Plex Mono (numbers)
+  Fonts: Poppins
    ═══════════════════════════════════════════════════════════════ */
 
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&display=swap');
 
 /* ── CSS Variables ─────────────────────────────────────────── */
 :root {
@@ -25,8 +25,8 @@
 
   /* Text — neutral zinc palette */
   --text-primary: #fafafa;
-  --text-secondary: #a1a1aa;
-  --text-muted: #52525b;
+  --text-secondary: #c4c7d0;
+  --text-muted: #a6abb6;
   --text-accent: #4ade80;
 
   /* Borders — flat zinc */
@@ -51,9 +51,9 @@
   --badge-unpaid-bg: rgba(113, 113, 122, 0.10);
   --badge-unpaid-color: #71717a;
 
-  /* Typography — IBM Plex family */
-  --font-ui: 'IBM Plex Sans', -apple-system, 'Segoe UI', system-ui, sans-serif;
-  --font-num: 'IBM Plex Mono', 'Consolas', 'Cascadia Code', monospace;
+  /* Typography */
+  --font-ui: 'Poppins', -apple-system, 'Segoe UI', system-ui, sans-serif;
+  --font-num: 'Poppins', -apple-system, 'Segoe UI', system-ui, sans-serif;
 
   /* Spacing — sharp, enterprise-grade radii */
   --radius-sm: 3px;
@@ -77,7 +77,7 @@
   --t-primary: var(--text-primary);
   --t-secondary: var(--text-secondary);
   --t-muted: var(--text-muted);
-  --t-faint: #71717a;
+  --t-faint: #9ca3af;
   --c-paid: var(--success);
   --c-partial: var(--warning);
   --c-overdue: var(--danger);
@@ -104,6 +104,14 @@ body {
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
   height: 100vh;
+}
+
+body * {
+  font-family: var(--font-ui) !important;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-weight: 700;
 }
 
 #root {

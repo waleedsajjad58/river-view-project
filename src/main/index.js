@@ -235,20 +235,40 @@ ipcMain.handle('db:get-plots', () => {
 
 ipcMain.handle('db:get-plot', (_e, id) => getDb().prepare('SELECT * FROM plots WHERE id = ? AND is_deleted = 0').get(id));
 
+const normalizePlotPayload = (plot = {}) => {
+    const floorsRaw = Number.parseInt(plot.commercial_floors, 10);
+    const floors = Number.isFinite(floorsRaw) ? Math.max(0, floorsRaw) : 0;
+    const maxFloors = plot.plot_type === 'residential_constructed' ? 4 : 20;
+    return {
+        ...plot,
+        plot_number: String(plot.plot_number || '').trim(),
+        block: plot.block || null,
+        notes: plot.notes || null,
+        commercial_floors: Math.min(floors, maxFloors),
+        has_water_connection: plot.has_water_connection ? 1 : 0,
+        has_sewerage_connection: plot.has_sewerage_connection ? 1 : 0,
+        has_mosque_contribution: plot.has_mosque_contribution === 0 ? 0 : 1,
+        upper_floors_residential: plot.upper_floors_residential ? 1 : 0,
+    };
+};
+
 ipcMain.handle('db:add-plot', (_e, plot) => {
+    const normalized = normalizePlotPayload(plot);
     return getDb().prepare(`
-        INSERT INTO plots (plot_number, block, marla_size, plot_type, commercial_floors, has_water_connection, has_sewerage_connection, upper_floors_residential, notes)
-        VALUES (@plot_number, @block, @marla_size, @plot_type, @commercial_floors, @has_water_connection, @has_sewerage_connection, @upper_floors_residential, @notes)
-    `).run(plot);
+        INSERT INTO plots (plot_number, block, marla_size, plot_type, commercial_floors, has_water_connection, has_sewerage_connection, has_mosque_contribution, upper_floors_residential, notes)
+        VALUES (@plot_number, @block, @marla_size, @plot_type, @commercial_floors, @has_water_connection, @has_sewerage_connection, @has_mosque_contribution, @upper_floors_residential, @notes)
+    `).run(normalized);
 });
 
 ipcMain.handle('db:update-plot', (_e, plot) => {
+    const normalized = normalizePlotPayload(plot);
     return getDb().prepare(`
         UPDATE plots SET plot_number=@plot_number, block=@block, marla_size=@marla_size, plot_type=@plot_type,
         commercial_floors=@commercial_floors, has_water_connection=@has_water_connection,
-        has_sewerage_connection=@has_sewerage_connection, upper_floors_residential=@upper_floors_residential,
+        has_sewerage_connection=@has_sewerage_connection, has_mosque_contribution=@has_mosque_contribution,
+        upper_floors_residential=@upper_floors_residential,
         notes=@notes, updated_at=CURRENT_TIMESTAMP WHERE id=@id
-    `).run(plot);
+    `).run(normalized);
 });
 
 ipcMain.handle('db:delete-plot', (_e, id) =>
@@ -265,22 +285,46 @@ ipcMain.handle('db:change-plot-type', (_e, { id, newType, changedBy, notes }) =>
 });
 
 // ── Members ───────────────────────────────────────────────────
-ipcMain.handle('db:get-members', () => getDb().prepare('SELECT * FROM members WHERE is_deleted = 0 ORDER BY name').all());
+const sanitizeMemberPayload = (member = {}) => ({
+    ...member,
+    member_id: String(member.member_id || '').trim(),
+    name: String(member.name || '').trim(),
+    cnic: String(member.cnic || '').trim(),
+    phone: String(member.phone || '').trim(),
+    membership_date: String(member.membership_date || '').trim(),
+    share_count: Number.parseInt(member.share_count, 10) || 4,
+    address: member.address || null,
+    notes: member.notes || null,
+});
+
+const validateRequiredMemberFields = (member) => {
+    if (!member.member_id) throw new Error('Member ID is required');
+    if (!member.name) throw new Error('Name is required');
+    if (!member.cnic) throw new Error('CNIC is required');
+    if (!member.phone) throw new Error('Phone number is required');
+    if (!member.membership_date) throw new Error('Membership date is required');
+};
+
+ipcMain.handle('db:get-members', () => getDb().prepare('SELECT * FROM members WHERE is_deleted = 0 ORDER BY member_id, name').all());
 
 ipcMain.handle('db:add-member', (_e, member) => {
+    const normalized = sanitizeMemberPayload(member);
+    validateRequiredMemberFields(normalized);
     return getDb().prepare(`
-        INSERT INTO members (name, cnic, phone, address, is_member, membership_date, share_count, notes)
-        VALUES (@name, @cnic, @phone, @address, @is_member, @membership_date, @share_count, @notes)
-    `).run(member);
+        INSERT INTO members (member_id, name, cnic, phone, address, is_member, membership_date, notes)
+        VALUES (@member_id, @name, @cnic, @phone, @address, @is_member, @membership_date, @notes)
+    `).run(normalized);
 });
 
 ipcMain.handle('db:get-member', (_e, id) => getDb().prepare('SELECT * FROM members WHERE id = ? AND is_deleted = 0').get(id));
 
 ipcMain.handle('db:update-member', (_e, member) => {
+    const normalized = sanitizeMemberPayload(member);
+    validateRequiredMemberFields(normalized);
     return getDb().prepare(`
-        UPDATE members SET name=@name, cnic=@cnic, phone=@phone, address=@address, is_member=@is_member,
-        membership_date=@membership_date, share_count=@share_count, notes=@notes WHERE id=@id
-    `).run(member);
+        UPDATE members SET member_id=@member_id, name=@name, cnic=@cnic, phone=@phone, address=@address, is_member=@is_member,
+        membership_date=@membership_date, notes=@notes WHERE id=@id
+    `).run(normalized);
 });
 
 ipcMain.handle('db:delete-member', (_e, id) => getDb().prepare('UPDATE members SET is_deleted = 1 WHERE id = ?').run(id));
@@ -410,25 +454,49 @@ ipcMain.handle('db:get-ownership-history', (_e, plotId) => {
 });
 
 // ── Tenants ───────────────────────────────────────────────────
+const sanitizeTenantPayload = (tenant = {}) => ({
+    ...tenant,
+    tenant_id: String(tenant.tenant_id || '').trim(),
+    name: String(tenant.name || '').trim(),
+    cnic: String(tenant.cnic || '').trim(),
+    phone: String(tenant.phone || '').trim(),
+    plot_id: Number.parseInt(tenant.plot_id, 10) || 0,
+    start_date: String(tenant.start_date || '').trim(),
+    end_date: String(tenant.end_date || '').trim() || null,
+    monthly_rent: Number(tenant.monthly_rent) || 0,
+    notes: tenant.notes || null,
+});
+
+const validateRequiredTenantFields = (tenant) => {
+    if (!tenant.tenant_id) throw new Error('Tenant ID is required');
+    if (!tenant.name) throw new Error('Name is required');
+    if (!tenant.cnic) throw new Error('CNIC is required');
+    if (!tenant.phone) throw new Error('Phone number is required');
+    if (!tenant.plot_id) throw new Error('Plot is required');
+    if (!tenant.start_date) throw new Error('Start date is required');
+};
+
 ipcMain.handle('db:get-tenants', (_e, plotId) => {
     const db = getDb();
-    if (plotId) return db.prepare('SELECT * FROM tenants WHERE plot_id = ? AND is_deleted = 0').all(plotId);
-    return db.prepare('SELECT t.*, p.plot_number FROM tenants t JOIN plots p ON t.plot_id = p.id WHERE t.is_deleted = 0').all();
+    if (plotId) return db.prepare('SELECT * FROM tenants WHERE plot_id = ? AND is_deleted = 0 ORDER BY tenant_id, name').all(plotId);
+    return db.prepare('SELECT t.*, p.plot_number FROM tenants t JOIN plots p ON t.plot_id = p.id WHERE t.is_deleted = 0 ORDER BY t.tenant_id, t.name').all();
 });
 
 ipcMain.handle('db:add-tenant', (_e, tenant) => {
-    const t = { ...tenant, end_date: tenant.end_date || null, start_date: tenant.start_date || null };
+    const t = sanitizeTenantPayload(tenant);
+    validateRequiredTenantFields(t);
     return getDb().prepare(`
-        INSERT INTO tenants (name, cnic, phone, plot_id, start_date, end_date, monthly_rent, notes)
-        VALUES (@name, @cnic, @phone, @plot_id, @start_date, @end_date, @monthly_rent, @notes)
+        INSERT INTO tenants (tenant_id, name, cnic, phone, plot_id, start_date, end_date, monthly_rent, notes)
+        VALUES (@tenant_id, @name, @cnic, @phone, @plot_id, @start_date, @end_date, @monthly_rent, @notes)
     `).run(t);
 });
 
 ipcMain.handle('db:update-tenant', (_e, tenant) => {
-    const t = { ...tenant, end_date: tenant.end_date || null, start_date: tenant.start_date || null };
+    const t = sanitizeTenantPayload(tenant);
+    validateRequiredTenantFields(t);
     return getDb().prepare(`
-        UPDATE tenants SET name=@name, cnic=@cnic, phone=@phone, start_date=@start_date,
-        end_date=@end_date, monthly_rent=@monthly_rent, notes=@notes WHERE id=@id
+        UPDATE tenants SET tenant_id=@tenant_id, name=@name, cnic=@cnic, phone=@phone, plot_id=@plot_id,
+        start_date=@start_date, end_date=@end_date, monthly_rent=@monthly_rent, notes=@notes WHERE id=@id
     `).run(t);
 });
 
@@ -643,6 +711,9 @@ ipcMain.handle('db:generate-monthly-bills', (_e, { billingMonth, notice }) => {
                 const items = [];
 
                 for (const t of templates.filter(t => t.plot_type === plot.plot_type)) {
+                    if (/mosque/i.test(t.charge_name) && !plot.has_mosque_contribution) {
+                        continue;
+                    }
                     if (t.is_conditional && t.condition_field) {
                         if (t.condition_field === 'commercial_floors') {
                             const floors = plot.commercial_floors || 0;
@@ -890,7 +961,7 @@ ipcMain.handle('db:get-bills', (_e, filters) => {
     const db = getDb();
     let query = `
         SELECT b.*, p.plot_number, m.name as owner_name, t.name as tenant_name,
-               (SELECT bi.charge_name FROM bill_items bi WHERE bi.bill_id = b.id LIMIT 1) as charge_name
+               (SELECT GROUP_CONCAT(bi.charge_name, ', ') FROM bill_items bi WHERE bi.bill_id = b.id) as charge_name
         FROM bills b
         LEFT JOIN plots p ON b.plot_id = p.id
         LEFT JOIN members m ON b.member_id = m.id
@@ -1336,8 +1407,32 @@ ipcMain.handle('db:get-onetime-charges', () => getDb().prepare(`
         charge_name
 `).all());
 
-ipcMain.handle('db:create-special-bill', (_e, { plotId, chargeName, amount, notes, dueDate }) => {
+ipcMain.handle('db:create-special-bill', (_e, payload) => {
     const db = getDb();
+    const { plotId, notes, dueDate } = payload || {};
+
+    const normalizedItems = Array.isArray(payload?.items)
+        ? payload.items
+            .map((item) => ({
+                chargeName: String(item?.chargeName || '').trim(),
+                amount: Number(item?.amount || 0),
+            }))
+            .filter((item) => item.chargeName && item.amount > 0)
+        : [];
+
+    // Backward compatibility for old single-item payload.
+    if (normalizedItems.length === 0) {
+        const legacyChargeName = String(payload?.chargeName || '').trim();
+        const legacyAmount = Number(payload?.amount || 0);
+        if (legacyChargeName && legacyAmount > 0) {
+            normalizedItems.push({ chargeName: legacyChargeName, amount: legacyAmount });
+        }
+    }
+
+    if (!plotId || normalizedItems.length === 0) {
+        throw new Error('Please provide plot and at least one valid special charge');
+    }
+
     const plot = db.prepare('SELECT * FROM plots WHERE id = ? AND is_deleted = 0').get(plotId);
     if (!plot) throw new Error('Plot not found');
     const owner = db.prepare('SELECT member_id FROM plot_ownership WHERE plot_id = ? AND end_date IS NULL').get(plotId);
@@ -1345,7 +1440,10 @@ ipcMain.handle('db:create-special-bill', (_e, { plotId, chargeName, amount, note
     const seq = String((db.prepare('SELECT COUNT(*) as c FROM bills').get()?.c || 0) + 1).padStart(3, '0');
     const today = new Date().toISOString().split('T')[0];
     const dueDateStr = dueDate || new Date(Date.now() + 15 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-    const billingMonth = new Date().toISOString().slice(0, 7); // YYYY-MM format
+    // Keep special bills outside month-uniqueness enforcement.
+    // The unique index applies only when billing_month is not null.
+    const billingMonth = null;
+    const totalAmount = normalizedItems.reduce((sum, item) => sum + item.amount, 0);
     
     return db.transaction(() => {
         const result = db.prepare(`
@@ -1353,8 +1451,12 @@ ipcMain.handle('db:create-special-bill', (_e, { plotId, chargeName, amount, note
                              subtotal, arrears, total_amount, balance_due, status, notes)
             VALUES (?, ?, ?, 'special', ?, ?, ?, ?, ?, ?, ?, 'unpaid', ?)
         `).run(`${prefix}SP-${seq}`, plotId, owner?.member_id || null, today, dueDateStr, billingMonth,
-               amount, 0, amount, amount, notes || null);
-        db.prepare('INSERT INTO bill_items (bill_id, charge_name, amount) VALUES (?, ?, ?)').run(result.lastInsertRowid, chargeName, amount);
+               totalAmount, 0, totalAmount, totalAmount, notes || null);
+
+        const insertItem = db.prepare('INSERT INTO bill_items (bill_id, charge_name, amount) VALUES (?, ?, ?)');
+        for (const item of normalizedItems) {
+            insertItem.run(result.lastInsertRowid, item.chargeName, item.amount);
+        }
     })();
 });
 
@@ -1553,15 +1655,13 @@ ipcMain.handle('db:report-income-expenditure', (_e, { startDate, endDate }) => {
     if (endDate) { scF += ' AND b.bill_date <= ?'; scP.push(endDate); }
     const specialChargesIncome = db.prepare(`
         SELECT 
-            sc.charge_name,
+            bi.charge_name,
             COUNT(DISTINCT b.id) as bill_count,
-            SUM(CASE WHEN bp.id IS NOT NULL THEN bi.amount ELSE 0 END) as collected
+            COALESCE(SUM(CASE WHEN b.amount_paid > 0 THEN MIN(bi.amount, b.amount_paid) ELSE 0 END), 0) as collected
         FROM bills b
         JOIN bill_items bi ON bi.bill_id = b.id
-        JOIN special_charges sc ON bi.charge_id = sc.id
-        LEFT JOIN bill_payments bp ON bp.bill_id = b.id
         WHERE b.is_deleted = 0 AND b.bill_type = 'special' ${scF}
-        GROUP BY sc.id, sc.charge_name
+        GROUP BY bi.charge_name
         HAVING collected > 0
         ORDER BY collected DESC
     `).all(...scP);
@@ -1898,6 +1998,9 @@ async function exportSpreadsheet(tableType) {
     let customKeys = null;
     if (tableType === 'plots') {
         data = db.prepare('SELECT p.*, m.name as owner_name FROM plots p LEFT JOIN plot_ownership po ON p.id = po.plot_id AND po.end_date IS NULL LEFT JOIN members m ON po.member_id = m.id WHERE p.is_deleted = 0 ORDER BY p.plot_number').all();
+        if (data.length > 0) {
+            customKeys = Object.keys(data[0]).filter((key) => key !== 'block');
+        }
         defaultFilename = 'plots_export.xlsx';
     } else if (tableType === 'members') {
         data = db.prepare('SELECT * FROM members WHERE is_deleted = 0').all();
@@ -2541,8 +2644,9 @@ ipcMain.handle('db:import-execute', (_e, { filePath }) => {
                         memberMap[memNo] = existing.id;
                     } else {
                         const r = db.prepare(`
-                            INSERT INTO members (name, notes) VALUES (?, ?)
-                        `).run(name, `MEM#${memNo}`);
+                            INSERT INTO members (member_id, name, cnic, phone, membership_date, notes)
+                            VALUES (?, ?, 'N/A', 'N/A', date('now'), ?)
+                        `).run(`MEM-${String(memNo).padStart(5, '0')}`, name, `MEM#${memNo}`);
                         memberMap[memNo] = r.lastInsertRowid;
                         results.members++;
                     }

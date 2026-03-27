@@ -14,9 +14,9 @@ const EDITABLE_SETTINGS = [
 ]
 
 const PLOT_TYPE_LABELS: Record<string, string> = {
-    residential_constructed: '🏠 Residential (Constructed)',
-    residential_vacant: '📐 Residential (Vacant)',
-    commercial: '🏪 Commercial',
+    residential_constructed: 'Residential (Constructed)',
+    residential_vacant: 'Residential (Vacant)',
+    commercial: 'Commercial',
 }
 
 export default function SettingsPage() {
@@ -156,11 +156,11 @@ export default function SettingsPage() {
     }
 
     const SECTIONS = [
-        { key: 'society', label: '🏢 Society Info' },
-        { key: 'billing', label: '💰 Bill Rates' },
-        { key: 'months', label: '🔒 Month Locking' },
-        { key: 'backup', label: '🗄️ Backup & Export' },
-        { key: 'security', label: '🔐 Security' },
+        { key: 'society', label: 'Society Info' },
+        { key: 'billing', label: 'Bill Rates' },
+        { key: 'months', label: 'Month Locking' },
+        { key: 'backup', label: 'Backup & Export' },
+        { key: 'security', label: 'Security' },
     ]
 
     return (
@@ -287,7 +287,7 @@ export default function SettingsPage() {
                                 </div>
                             </div>
                             <button className="btn btn-primary" onClick={handleLockMonth} disabled={!lockMonth} style={{ marginTop: '0.5rem' }}>
-                                🔒 Lock Month
+                                <Lock size={16} /> Lock Month
                             </button>
                         </div>
 
@@ -306,7 +306,7 @@ export default function SettingsPage() {
                                             <td>
                                                 <button className="btn btn-ghost btn-sm" style={{ color: 'var(--danger)', fontSize: '0.8rem' }}
                                                     onClick={() => handleUnlockMonth(m.billing_month)}>
-                                                    🔓 Unlock
+                                                    Unlock
                                                 </button>
                                             </td>
                                         </tr>

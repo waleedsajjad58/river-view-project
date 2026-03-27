@@ -67,10 +67,10 @@ function MemberForm({ form, onChange }: { form: any, onChange: (f: any) => void 
                     />
                 </div>
                 <div className="form-group">
-                    <label>CNIC</label>
-                    <input type="text" value={form.cnic}
-                        onChange={e => set('cnic', e.target.value)}
-                        placeholder="35201-1234567-1"
+                    <label>Member ID *</label>
+                    <input type="text" value={form.member_id || ''}
+                        onChange={e => set('member_id', e.target.value)}
+                        placeholder="e.g. MEM-00001"
                         style={{ fontFamily: 'IBM Plex Mono', letterSpacing: '0.02em' }}
                     />
                 </div>
@@ -78,13 +78,24 @@ function MemberForm({ form, onChange }: { form: any, onChange: (f: any) => void 
             {/* Row 2 */}
             <div className="form-grid">
                 <div className="form-group">
-                    <label>Phone</label>
+                    <label>CNIC *</label>
+                    <input type="text" value={form.cnic}
+                        onChange={e => set('cnic', e.target.value)}
+                        placeholder="35201-1234567-1"
+                        style={{ fontFamily: 'IBM Plex Mono', letterSpacing: '0.02em' }}
+                    />
+                </div>
+                <div className="form-group">
+                    <label>Phone *</label>
                     <input type="text" value={form.phone}
                         onChange={e => set('phone', e.target.value)}
                         placeholder="0300-1234567"
                         style={{ fontFamily: 'IBM Plex Mono' }}
                     />
                 </div>
+            </div>
+            {/* Row 3 */}
+            <div className="form-grid">
                 <div className="form-group">
                     <label>Address</label>
                     <input type="text" value={form.address}
@@ -92,20 +103,10 @@ function MemberForm({ form, onChange }: { form: any, onChange: (f: any) => void 
                         placeholder="House / Street / Area"
                     />
                 </div>
-            </div>
-            {/* Row 3 */}
-            <div className="form-grid">
                 <div className="form-group">
-                    <label>Membership Date</label>
+                    <label>Membership Date *</label>
                     <input type="date" value={form.membership_date}
                         onChange={e => set('membership_date', e.target.value)} />
-                </div>
-                <div className="form-group">
-                    <label>Shares</label>
-                    <input type="number" min="0" value={form.share_count}
-                        onChange={e => set('share_count', parseInt(e.target.value) || 0)}
-                        style={{ fontFamily: 'IBM Plex Mono' }}
-                    />
                 </div>
             </div>
             {/* Toggle */}
@@ -356,11 +357,11 @@ function MemberInfo({ member, plots }: { member: any, plots: any[] }) {
     return (
         <div>
             {row('Full Name', member.name)}
+            {row('Member ID', member.member_id, true)}
             {row('CNIC', member.cnic, true)}
             {row('Phone', member.phone, true)}
             {row('Address', member.address)}
             {row('Joined', member.membership_date)}
-            {row('Shares', member.share_count ?? 4)}
             {row('Status', member.is_member ? 'Active Member' : 'Inactive')}
             {member.notes && row('Notes', member.notes)}
 
@@ -423,10 +424,10 @@ function MemberPanel({ member, onClose, onSaved, onDeleted }: {
     }, [member.id])
 
     const handleSave = async () => {
-        if (!form.name.trim()) return
+        if (!form.name.trim() || !String(form.member_id || '').trim() || !String(form.cnic || '').trim() || !String(form.phone || '').trim() || !String(form.membership_date || '').trim()) return
         setSaving(true)
         try {
-            await ipc.invoke('db:update-member', { ...form, id: member.id })
+            await ipc.invoke('db:update-member', { ...form, id: member.id, share_count: 4 })
             onSaved()
         } finally { setSaving(false) }
     }
@@ -463,12 +464,12 @@ function MemberPanel({ member, onClose, onSaved, onDeleted }: {
                             }}>
                                 {member.name}
                             </div>
-                            {member.cnic && (
+                            {(member.member_id || member.cnic) && (
                                 <div style={{
                                     fontSize: 11, color: 'var(--t-faint)',
                                     fontFamily: 'IBM Plex Mono'
                                 }}>
-                                    {member.cnic}
+                                    {(member.member_id || '').trim() || member.cnic}
                                 </div>
                             )}
                         </div>
@@ -556,7 +557,7 @@ function MemberPanel({ member, onClose, onSaved, onDeleted }: {
                                     Cancel
                                 </button>
                                 <button className="btn btn-primary" onClick={handleSave}
-                                    disabled={saving || !form.name.trim()}>
+                                    disabled={saving || !form.name.trim() || !String(form.member_id || '').trim() || !String(form.cnic || '').trim() || !String(form.phone || '').trim() || !String(form.membership_date || '').trim()}>
                                     <Check size={14} />
                                     {saving ? 'Saving...' : 'Save Changes'}
                                 </button>
@@ -572,17 +573,21 @@ function MemberPanel({ member, onClose, onSaved, onDeleted }: {
 // ── Add member panel ──────────────────────────────────────────
 function AddMemberPanel({ onClose, onSaved }: { onClose: () => void, onSaved: () => void }) {
     const [form, setForm] = useState({
-        name: '', cnic: '', phone: '', address: '',
-        is_member: 1, membership_date: '', share_count: 4, notes: ''
+        member_id: '', name: '', cnic: '', phone: '', address: '',
+        is_member: 1, membership_date: '', notes: ''
     })
     const [saving, setSaving] = useState(false)
     const [err, setErr] = useState('')
 
     const handleSave = async () => {
         if (!form.name.trim()) { setErr('Name is required'); return }
+        if (!form.member_id.trim()) { setErr('Member ID is required'); return }
+        if (!form.cnic.trim()) { setErr('CNIC is required'); return }
+        if (!form.phone.trim()) { setErr('Phone number is required'); return }
+        if (!form.membership_date.trim()) { setErr('Membership date is required'); return }
         setSaving(true)
         try {
-            await ipc.invoke('db:add-member', form)
+            await ipc.invoke('db:add-member', { ...form, share_count: 4 })
             onSaved()
         } catch (e: any) {
             setErr(e.message || 'Failed to save')
@@ -609,7 +614,7 @@ function AddMemberPanel({ onClose, onSaved }: { onClose: () => void, onSaved: ()
                 <div className="panel-footer" style={{ justifyContent: 'flex-end' }}>
                     <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
                     <button className="btn btn-primary btn-lg" onClick={handleSave}
-                        disabled={saving || !form.name.trim()}>
+                        disabled={saving || !form.name.trim() || !form.member_id.trim() || !form.cnic.trim() || !form.phone.trim() || !form.membership_date.trim()}>
                         <Check size={15} />
                         {saving ? 'Saving...' : 'Save Member'}
                     </button>
@@ -648,10 +653,11 @@ export default function MembersPage() {
         setTimeout(() => setMsg(''), 3500)
     }
 
-    // Search across name, CNIC, and phone
+    // Search across member ID, name, CNIC, and phone
     const q = search.toLowerCase().replace(/[-\s]/g, '')
     const displayed = q
         ? members.filter(m =>
+            m.member_id?.replace(/[-\s]/g, '').toLowerCase().includes(q) ||
             m.name?.toLowerCase().includes(q) ||
             m.cnic?.replace(/[-\s]/g, '').toLowerCase().includes(q) ||
             m.phone?.replace(/[-\s]/g, '').toLowerCase().includes(q)
@@ -695,7 +701,7 @@ export default function MembersPage() {
                         ref={searchRef}
                         value={search}
                         onChange={e => setSearch(e.target.value)}
-                        placeholder="Search by name, CNIC, or phone number..."
+                        placeholder="Search by Member ID, name, CNIC, or phone number..."
                     />
                     {search && (
                         <button
@@ -718,11 +724,11 @@ export default function MembersPage() {
                 <table className="data-table">
                     <thead>
                         <tr>
+                            <th>Member ID</th>
                             <th>Name</th>
                             <th>CNIC</th>
                             <th>Phone</th>
                             <th>Plots Owned</th>
-                            <th style={{ textAlign: 'center' }}>Shares</th>
                             <th>Status</th>
                         </tr>
                     </thead>
@@ -745,6 +751,12 @@ export default function MembersPage() {
                             </td></tr>
                         ) : displayed.map(m => (
                             <tr key={m.id} onClick={() => setSelected(m)}>
+                                <td style={{
+                                    fontFamily: 'IBM Plex Mono', fontSize: 12,
+                                    color: 'var(--t-muted)', letterSpacing: '0.01em'
+                                }}>
+                                    {m.member_id || '—'}
+                                </td>
                                 <td>
                                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                                         <div style={{
@@ -775,12 +787,6 @@ export default function MembersPage() {
                                 </td>
                                 <td>
                                     <MemberPlotsCell memberId={m.id} />
-                                </td>
-                                <td style={{
-                                    textAlign: 'center', fontFamily: 'IBM Plex Mono',
-                                    fontSize: 12, color: 'var(--t-muted)'
-                                }}>
-                                    {m.share_count || 4}
                                 </td>
                                 <td>
                                     <span className={`badge ${m.is_member ? 'badge-paid' : 'badge-gray'}`}>

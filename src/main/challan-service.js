@@ -44,6 +44,24 @@ function pick(items, pattern) {
         .reduce((s, i) => s + (Number(i.amount) || 0), 0);
 }
 
+function normalizeChargeLabel(chargeName) {
+  const raw = String(chargeName || '').trim();
+  if (!raw) return 'Charge';
+  if (/monthly contribution|base contribution/i.test(raw)) return 'Monthly Contribution';
+  if (/mosque/i.test(raw)) return 'Mosque Fund';
+  if (/garbage/i.test(raw)) return 'Garbage Charges';
+  if (/aquifer/i.test(raw)) return 'Aquifer Charges';
+  return raw;
+}
+
+function chargeSortPriority(label) {
+  if (/^monthly contribution$/i.test(label)) return 1;
+  if (/^mosque fund$/i.test(label)) return 2;
+  if (/^garbage charges$/i.test(label)) return 3;
+  if (/^aquifer charges$/i.test(label)) return 4;
+  return 50;
+}
+
 function resolveTemplatePath() {
     const candidates = [
         join(app.getAppPath(), 'out', 'renderer', 'bill-template.html'),
@@ -93,7 +111,8 @@ export function generateChallanHTML(billId, customAmount = null, printRemarks = 
         SELECT
             b.*,
             p.plot_number,
-            m.name AS member_name,
+            COALESCE(m.member_id, owner_m.member_id) AS member_code,
+            COALESCE(m.name, owner_m.name) AS member_name,
             t.name AS tenant_name,
             (SELECT MAX(b2.billing_month) FROM bills b2
              WHERE b2.plot_id = b.plot_id AND b2.status = 'paid' AND b2.is_deleted = 0) AS paid_upto,
@@ -103,6 +122,8 @@ export function generateChallanHTML(billId, customAmount = null, printRemarks = 
         FROM bills b
         LEFT JOIN plots p ON p.id = b.plot_id
         LEFT JOIN members m ON m.id = b.member_id
+        LEFT JOIN plot_ownership owner_po ON owner_po.plot_id = b.plot_id AND owner_po.end_date IS NULL
+        LEFT JOIN members owner_m ON owner_m.id = owner_po.member_id
         LEFT JOIN tenants t ON t.id = b.tenant_id
         WHERE b.id = ? AND b.is_deleted = 0
     `).get(billId);
@@ -121,20 +142,32 @@ export function generateChallanHTML(billId, customAmount = null, printRemarks = 
         ? Number(customAmount).toLocaleString('en-PK')
         : fmt(row.total_amount);
 
-    // Build special charges section for special bills
-    let specialSection = '';
-    if (row.bill_type === 'special' && items.length > 0) {
-        const itemRows = items.map(i =>
-            `<tr><td>${i.charge_name}</td><td>Rs. ${Number(i.amount).toLocaleString('en-PK')}</td></tr>`
-        ).join('');
-        specialSection = `
-        <div class="special-section">
-            <div class="special-section-title">&#9733; Special Charges Breakdown</div>
-            <table class="special-charges-table">
-                ${itemRows}
-            </table>
-        </div>`;
-    }
+    const rowHtml = (label, amount, rowClass = '') => {
+      const cls = rowClass ? ` class="${rowClass}"` : '';
+      return `<tr${cls}><td>${label}</td><td class="amt">${amount}</td></tr>`;
+    };
+
+    const groupedItems = Object.values(
+      items.reduce((acc, i) => {
+        const label = normalizeChargeLabel(i.charge_name);
+        if (!acc[label]) acc[label] = { label, amount: 0 };
+        acc[label].amount += Number(i.amount) || 0;
+        return acc;
+      }, {})
+    ).sort((a, b) => {
+      const pa = chargeSortPriority(a.label);
+      const pb = chargeSortPriority(b.label);
+      if (pa !== pb) return pa - pb;
+      return a.label.localeCompare(b.label);
+    });
+
+    const descriptionRows = [
+      ...groupedItems.map((i) => rowHtml(escapeHtml(i.label), fmt(i.amount))),
+      Number(row.arrears || 0) > 0.009 ? rowHtml('Arrears', fmt(row.arrears)) : null,
+      rowHtml('Payable Within Due Date', payable, 'total-row'),
+      rowHtml('Payable After Due Date', fmt(payableAfterDue), 'late-row'),
+    ].filter(Boolean).join('');
+    const specialSection = '';
 
     const html = readFileSync(resolveTemplatePath(), 'utf8');
 
@@ -147,7 +180,7 @@ export function generateChallanHTML(billId, customAmount = null, printRemarks = 
 
     return html
         .replace(/\{\{PLOT_NO\}\}/g,              row.plot_number || '')
-        .replace(/\{\{MEMBERSHIP_NO\}\}/g,         row.member_id ? `M-${row.member_id}` : '')
+      .replace(/\{\{MEMBERSHIP_NO\}\}/g,         row.member_code || '')
         .replace(/\{\{MEMBER_NAME\}\}/g,           row.member_name || '')
         .replace(/\{\{TENANT_NAME\}\}/g,           row.tenant_name || '')
         .replace(/\{\{CHALLAN_NO\}\}/g,            row.bill_number || '')
@@ -157,6 +190,7 @@ export function generateChallanHTML(billId, customAmount = null, printRemarks = 
         .replace(/\{\{PAID_UPTO\}\}/g,             fmtMonth(row.paid_upto))
         .replace(/\{\{TENANT_PAID_UPTO\}\}/g,      fmtMonth(row.tenant_paid_upto))
         .replace(/\{\{NOTICE_TEXT\}\}/g, remarksHtml)
+        .replace(/\{\{DESCRIPTION_ROWS\}\}/g,      descriptionRows)
         .replace(/\{\{ADV_PERIOD\}\}/g,            advPeriod)
         .replace(/\{\{RECEIPT_PERIOD\}\}/g,        advPeriod || fmtMonth(row.billing_month))
         .replace(/\{\{MONTHLY_CONTRIBUTION\}\}/g,  fmt(pick(items, /monthly contribution/i)))
@@ -211,17 +245,30 @@ export function printChallan(html) {
         // Small delay to ensure rendering is complete
         setTimeout(() => {
             try {
-                // The callback parameter is deprecated and may not be called reliably
-                // Instead, we close after print dialog is dismissed
-                win.webContents.print({ silent: false, printBackground: true });
-                
-                // Give user ~5 seconds to interact with print dialog before closing
-                setTimeout(() => {
-                    if (!win.isDestroyed()) {
-                        win.close();
-                    }
-                    activePrintWindows.delete(win);
-                }, 5000);
+          // Do not close early; closing before print/PDF finalization can corrupt output files.
+          const closeSafely = () => {
+            if (!win.isDestroyed()) {
+              win.close();
+            }
+            activePrintWindows.delete(win);
+          };
+
+          win.webContents.print(
+            { silent: false, printBackground: true },
+            (_success, failureReason) => {
+              if (failureReason) {
+                console.error('[printChallan] Print failed:', failureReason);
+              }
+              closeSafely();
+            }
+          );
+
+          // Fallback in case callback is not triggered on some printers/drivers.
+          setTimeout(() => {
+            if (activePrintWindows.has(win)) {
+              closeSafely();
+            }
+          }, 120000);
             } catch (err) {
                 console.error('[printChallan] Error during print:', err);
                 activePrintWindows.delete(win);

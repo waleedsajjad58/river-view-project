@@ -8,6 +8,7 @@ export default function SpecialBillsPage() {
     const [charges, setCharges] = useState<any[]>([])
     const [plots, setPlots] = useState<any[]>([])
     const [bills, setBills] = useState<any[]>([])
+    const [selectedItems, setSelectedItems] = useState<Array<{ chargeName: string; amount: number }>>([])
     const [showForm, setShowForm] = useState(false)
     const [message, setMessage] = useState('')
     const [form, setForm] = useState({
@@ -52,23 +53,37 @@ export default function SpecialBillsPage() {
         return calculateBaseAmount(selectedCharge, form.plotId)
     }
 
-    const createBill = async () => {
-        if (!form.plotId || (!form.chargeId && !form.customName)) return
-        const chargeName = form.customName || selectedCharge?.charge_name || 'Special Charge'
+    const addChargeToBill = () => {
+        if (!form.chargeId) return
+        const chargeName = form.chargeId === 'custom'
+            ? form.customName.trim()
+            : (selectedCharge?.charge_name || '')
         const amount = form.amount || computeAmount()
-        if (amount <= 0) return
+        if (!chargeName || amount <= 0) return
+
+        setSelectedItems((prev) => [...prev, { chargeName, amount }])
+        setForm((prev) => ({ ...prev, chargeId: '', amount: 0, customName: '', transferAmount: 0 }))
+    }
+
+    const removeItem = (index: number) => {
+        setSelectedItems((prev) => prev.filter((_, i) => i !== index))
+    }
+
+    const createBill = async () => {
+        if (!form.plotId || selectedItems.length === 0) return
+        const totalAmount = selectedItems.reduce((sum, item) => sum + item.amount, 0)
 
         try {
             await ipc.invoke('db:create-special-bill', {
                 plotId: parseInt(form.plotId),
-                chargeName,
-                amount,
+                items: selectedItems,
                 notes: form.notes,
                 dueDate: form.dueDate || undefined
             })
-            setMessage(`Special bill created: ${chargeName} — Rs. ${amount.toLocaleString()}`)
+            setMessage(`Special bill created with ${selectedItems.length} charge(s) — Rs. ${totalAmount.toLocaleString()}`)
             setShowForm(false)
             setForm({ plotId: '', chargeId: '', amount: 0, notes: '', customName: '', transferAmount: 0, dueDate: '' })
+            setSelectedItems([])
             load()
         } catch (e: any) {
             setMessage(`Error: ${e.message}`)
@@ -179,6 +194,28 @@ export default function SpecialBillsPage() {
                     )}
 
                     <div className="form-group">
+                        <button className="btn btn-secondary" type="button" onClick={addChargeToBill} disabled={!form.chargeId || (!selectedCharge && !form.customName.trim()) || form.amount <= 0}>
+                            Add Charge To Bill
+                        </button>
+                    </div>
+
+                    <div className="form-group">
+                        <label>Selected Charges</label>
+                        {selectedItems.length === 0 ? (
+                            <div className="empty-row" style={{ padding: '8px 0' }}>No charges added yet.</div>
+                        ) : (
+                            <div style={{ border: '1px solid #e5e7eb', borderRadius: 8, overflow: 'hidden' }}>
+                                {selectedItems.map((item, idx) => (
+                                    <div key={`${item.chargeName}-${idx}`} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 10px', borderBottom: idx === selectedItems.length - 1 ? 'none' : '1px solid #f1f5f9' }}>
+                                        <span>{item.chargeName} - Rs. {item.amount.toLocaleString()}</span>
+                                        <button className="btn btn-ghost" type="button" onClick={() => removeItem(idx)}>Remove</button>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+
+                    <div className="form-group">
                         <label>Due Date (Optional)</label>
                         <input type="date" value={form.dueDate} onChange={e => setForm({ ...form, dueDate: e.target.value })} />
                     </div>
@@ -189,8 +226,11 @@ export default function SpecialBillsPage() {
                     </div>
                 </div>
                 <div className="modal-actions">
-                    <button className="btn btn-ghost" onClick={() => setShowForm(false)}>Cancel</button>
-                    <button className="btn btn-primary" onClick={createBill} disabled={!form.plotId || form.amount <= 0}>
+                    <button className="btn btn-ghost" onClick={() => {
+                        setShowForm(false)
+                        setSelectedItems([])
+                    }}>Cancel</button>
+                    <button className="btn btn-primary" onClick={createBill} disabled={!form.plotId || selectedItems.length === 0}>
                         <DollarSign size={16} /> Generate Bill
                     </button>
                 </div>

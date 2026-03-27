@@ -28,6 +28,7 @@ const emptyPlot = {
     plot_number: '', block: '', marla_size: '5 Marla',
     plot_type: 'residential_vacant', commercial_floors: 0,
     has_water_connection: 0, has_sewerage_connection: 0,
+    has_mosque_contribution: 1,
     upper_floors_residential: 0, notes: ''
 }
 
@@ -463,6 +464,9 @@ function PlotStatement({ plotId, onPaymentSaved }: { plotId: number, onPaymentSa
 function PlotForm({ form, onChange }: { form: any, onChange: (f: any) => void }) {
     const set = (k: string, v: any) => onChange({ ...form, [k]: v })
     const isCommercial = form.plot_type === 'commercial'
+    const isResidentialConstructed = form.plot_type === 'residential_constructed'
+    const showFloors = isCommercial || isResidentialConstructed
+    const maxFloors = isResidentialConstructed ? 4 : 20
     return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
             <div className="form-grid">
@@ -488,12 +492,18 @@ function PlotForm({ form, onChange }: { form: any, onChange: (f: any) => void })
                 </div>
                 <div className="form-group">
                     <label>Plot Type</label>
-                    <select value={form.plot_type} onChange={e => set('plot_type', e.target.value)}>
+                    <select value={form.plot_type} onChange={e => {
+                        const nextType = e.target.value
+                        const nextFloors = nextType === 'residential_constructed'
+                            ? Math.min(Number(form.commercial_floors || 0), 4)
+                            : Number(form.commercial_floors || 0)
+                        onChange({ ...form, plot_type: nextType, commercial_floors: nextFloors })
+                    }}>
                         {PLOT_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
                     </select>
                 </div>
             </div>
-            {isCommercial && (
+            {showFloors && (
                 <div style={{
                     background: 'var(--bg-subtle)', border: '1px solid var(--accent-border)',
                     borderRadius: 'var(--r-lg)', padding: '14px 16px',
@@ -503,42 +513,55 @@ function PlotForm({ form, onChange }: { form: any, onChange: (f: any) => void })
                         fontSize: 11, fontWeight: 700, textTransform: 'uppercase',
                         letterSpacing: '0.07em', color: 'var(--accent)', fontFamily: 'IBM Plex Mono'
                     }}>
-                        Commercial Details
+                        Building Details
                     </div>
                     <div className="form-grid">
                         <div className="form-group">
-                            <label>No. of Commercial Floors</label>
-                            <input type="number" min="0" max="20" value={form.commercial_floors}
-                                onChange={e => set('commercial_floors', parseInt(e.target.value) || 0)}
+                            <label>{isCommercial ? 'No. of Commercial Floors' : 'No. of Residential Floors'}</label>
+                            <input type="number" min="0" max={maxFloors} value={form.commercial_floors}
+                                onChange={e => {
+                                    const raw = parseInt(e.target.value, 10)
+                                    const next = Number.isFinite(raw) ? Math.max(0, Math.min(raw, maxFloors)) : 0
+                                    set('commercial_floors', next)
+                                }}
                                 style={{ fontFamily: 'IBM Plex Mono', fontWeight: 600 }} />
                             <span style={{ fontSize: 11, color: 'var(--t-faint)', marginTop: 2 }}>
-                                Rs. 700/floor added to monthly bill
+                                {isCommercial ? 'Rs. 700/floor added to monthly bill' : 'Maximum 4 floors for residential constructed plots'}
                             </span>
                         </div>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 12, paddingTop: 4 }}>
-                            <Toggle checked={!!form.upper_floors_residential}
-                                onChange={v => set('upper_floors_residential', v ? 1 : 0)}
-                                label="Upper floors residential" />
-                            <Toggle checked={!!form.has_water_connection}
-                                onChange={v => set('has_water_connection', v ? 1 : 0)}
-                                label="Water connection" />
-                        </div>
+                        {isCommercial && (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 12, paddingTop: 4 }}>
+                                <Toggle checked={!!form.upper_floors_residential}
+                                    onChange={v => set('upper_floors_residential', v ? 1 : 0)}
+                                    label="Upper floors residential" />
+                            </div>
+                        )}
                     </div>
-                    <Toggle checked={!!form.has_sewerage_connection}
-                        onChange={v => set('has_sewerage_connection', v ? 1 : 0)}
-                        label="Sewerage connection" />
+                    {isCommercial && (
+                        <Toggle checked={!!form.has_sewerage_connection}
+                            onChange={v => set('has_sewerage_connection', v ? 1 : 0)}
+                            label="Sewerage connection" />
+                    )}
                 </div>
             )}
             {!isCommercial && (
                 <div style={{ display: 'flex', gap: 24, paddingTop: 4 }}>
-                    <Toggle checked={!!form.has_water_connection}
-                        onChange={v => set('has_water_connection', v ? 1 : 0)}
-                        label="Water connection" />
                     <Toggle checked={!!form.has_sewerage_connection}
                         onChange={v => set('has_sewerage_connection', v ? 1 : 0)}
                         label="Sewerage connection" />
                 </div>
             )}
+            <div style={{ display: 'flex', gap: 24, paddingTop: 4 }}>
+                <Toggle checked={!!form.has_mosque_contribution}
+                    onChange={v => {
+                        if (!v) {
+                            const ok = window.confirm('Disable Mosque Contribution for this plot? It will be excluded from future monthly bills.');
+                            if (!ok) return;
+                        }
+                        set('has_mosque_contribution', v ? 1 : 0)
+                    }}
+                    label="Include Mosque Contribution in monthly bill" />
+            </div>
             <div className="form-group">
                 <label>Notes</label>
                 <textarea value={form.notes}
@@ -576,13 +599,12 @@ function PlotInfo({ plot, owner }: { plot: any, owner: any }) {
     return (
         <div>
             {row('Plot Number', plot.plot_number, true)}
-            {row('Block', plot.block)}
             {row('Size', plot.marla_size)}
             {row('Type', TYPE_LABEL[plot.plot_type] || plot.plot_type)}
-            {plot.plot_type === 'commercial' && row('Commercial Floors', `${plot.commercial_floors || 0} floor(s)`)}
+            {(plot.plot_type === 'commercial' || plot.plot_type === 'residential_constructed') && row('Floors', `${plot.commercial_floors || 0} floor(s)`)}
             {plot.plot_type === 'commercial' && row('Upper Floors Residential', plot.upper_floors_residential ? 'Yes' : 'No')}
-            {row('Water Connection', plot.has_water_connection ? 'Yes' : 'No')}
             {row('Sewerage Connection', plot.has_sewerage_connection ? 'Yes' : 'No')}
+            {row('Mosque Contribution', plot.has_mosque_contribution ? 'Included' : 'Excluded')}
             {owner
                 ? row('Current Owner', `${owner.owner_name} (since ${owner.start_date})`)
                 : row('Current Owner', null)}
@@ -783,7 +805,7 @@ function TenantsTab({ plot, onMsg }: { plot: any, onMsg: (m: string) => void }) 
     const [showForm, setShowForm] = useState(false)
     const [editId, setEditId] = useState<number | null>(null)
     const [form, setForm] = useState({
-        name: '', cnic: '', phone: '',
+        tenant_id: '', name: '', cnic: '', phone: '',
         start_date: new Date().toISOString().split('T')[0],
         end_date: '', monthly_rent: '2500', notes: ''
     })
@@ -797,7 +819,7 @@ function TenantsTab({ plot, onMsg }: { plot: any, onMsg: (m: string) => void }) 
 
     const openAdd = () => {
         setForm({
-            name: '', cnic: '', phone: '',
+            tenant_id: '', name: '', cnic: '', phone: '',
             start_date: new Date().toISOString().split('T')[0],
             end_date: '', monthly_rent: '2500', notes: ''
         })
@@ -805,14 +827,14 @@ function TenantsTab({ plot, onMsg }: { plot: any, onMsg: (m: string) => void }) 
     }
     const openEdit = (t: any) => {
         setForm({
-            name: t.name, cnic: t.cnic || '', phone: t.phone || '',
+            tenant_id: t.tenant_id || '', name: t.name, cnic: t.cnic || '', phone: t.phone || '',
             start_date: t.start_date || '', end_date: t.end_date || '',
             monthly_rent: t.monthly_rent?.toString() || '2500', notes: t.notes || ''
         })
         setEditId(t.id); setShowForm(true)
     }
     const handleSave = async () => {
-        if (!form.name.trim()) return
+        if (!form.tenant_id.trim() || !form.name.trim() || !form.cnic.trim() || !form.phone.trim() || !form.start_date) return
         if (editId) {
             await ipc.invoke('db:update-tenant', { ...form, id: editId, monthly_rent: parseFloat(form.monthly_rent) || 0 })
         } else {
@@ -849,6 +871,7 @@ function TenantsTab({ plot, onMsg }: { plot: any, onMsg: (m: string) => void }) 
                             </span>
                         </div>
                         <div style={{ fontSize: 12, color: 'var(--t-muted)', display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                            {t.tenant_id && <span style={{ fontFamily: 'IBM Plex Mono' }}>Tenant ID: {t.tenant_id}</span>}
                             {t.cnic && <span style={{ fontFamily: 'IBM Plex Mono' }}>CNIC: {t.cnic}</span>}
                             {t.phone && <span style={{ fontFamily: 'IBM Plex Mono' }}>{t.phone}</span>}
                             <span style={{ fontFamily: 'IBM Plex Mono' }}>Rs. {(t.monthly_rent || 0).toLocaleString()}/mo</span>
@@ -873,18 +896,24 @@ function TenantsTab({ plot, onMsg }: { plot: any, onMsg: (m: string) => void }) 
                     </div>
                     <div className="form-grid" style={{ marginBottom: 12 }}>
                         <div className="form-group">
+                            <label>Tenant ID *</label>
+                            <input type="text" value={form.tenant_id}
+                                onChange={e => setForm({ ...form, tenant_id: e.target.value })}
+                                style={{ fontFamily: 'IBM Plex Mono' }} />
+                        </div>
+                        <div className="form-group">
                             <label>Name *</label>
                             <input type="text" value={form.name}
                                 onChange={e => setForm({ ...form, name: e.target.value })} autoFocus />
                         </div>
                         <div className="form-group">
-                            <label>CNIC</label>
+                            <label>CNIC *</label>
                             <input type="text" value={form.cnic}
-                                onChange={e => setForm({ ...form, cnic: e.target.value })} placeholder="Optional"
+                                onChange={e => setForm({ ...form, cnic: e.target.value })}
                                 style={{ fontFamily: 'IBM Plex Mono' }} />
                         </div>
                         <div className="form-group">
-                            <label>Phone</label>
+                            <label>Phone *</label>
                             <input type="text" value={form.phone}
                                 onChange={e => setForm({ ...form, phone: e.target.value })}
                                 style={{ fontFamily: 'IBM Plex Mono' }} />
@@ -896,7 +925,7 @@ function TenantsTab({ plot, onMsg }: { plot: any, onMsg: (m: string) => void }) 
                                 style={{ fontFamily: 'IBM Plex Mono' }} />
                         </div>
                         <div className="form-group">
-                            <label>Start Date</label>
+                            <label>Start Date *</label>
                             <input type="date" value={form.start_date}
                                 onChange={e => setForm({ ...form, start_date: e.target.value })} />
                         </div>
@@ -923,7 +952,7 @@ function TenantsTab({ plot, onMsg }: { plot: any, onMsg: (m: string) => void }) 
                         </div>
                         <div style={{ display: 'flex', gap: 8 }}>
                             <button className="btn btn-ghost btn-sm" onClick={() => setShowForm(false)}>Cancel</button>
-                            <button className="btn btn-primary btn-sm" onClick={handleSave} disabled={!form.name.trim()}>
+                            <button className="btn btn-primary btn-sm" onClick={handleSave} disabled={!form.tenant_id.trim() || !form.name.trim() || !form.cnic.trim() || !form.phone.trim() || !form.start_date}>
                                 <Check size={12} /> Save
                             </button>
                         </div>
@@ -959,7 +988,8 @@ function PlotPanel({ plot, members, onClose, onSaved, onDeleted }: {
     }, [plot.id])
 
     useEffect(() => {
-        setForm({ ...plot }); setTab('overview'); setMode('view'); setConfirm(false)
+        setForm({ ...plot, has_mosque_contribution: plot.has_mosque_contribution === 0 ? 0 : 1 });
+        setTab('overview'); setMode('view'); setConfirm(false)
         loadHistory()
     }, [plot.id])
 
@@ -971,7 +1001,11 @@ function PlotPanel({ plot, members, onClose, onSaved, onDeleted }: {
         finally { setSaving(false) }
     }
 
-    const cancelEdit = () => { setForm({ ...plot }); setMode('view'); setConfirm(false) }
+    const cancelEdit = () => {
+        setForm({ ...plot, has_mosque_contribution: plot.has_mosque_contribution === 0 ? 0 : 1 });
+        setMode('view');
+        setConfirm(false);
+    }
     const showMsg = (m: string) => { setMsg(m); setTimeout(() => setMsg(''), 3000) }
 
     const TABS: { key: PlotTab, label: string }[] = [
@@ -1270,7 +1304,7 @@ export default function PlotsPage() {
                                         style={{ fontSize: 10.5 }}>
                                         {TYPE_LABEL[p.plot_type] || p.plot_type}
                                     </span>
-                                    {p.plot_type === 'commercial' && p.commercial_floors > 0 && (
+                                    {(p.plot_type === 'commercial' || p.plot_type === 'residential_constructed') && p.commercial_floors > 0 && (
                                         <span style={{
                                             fontSize: 10.5, color: 'var(--t-faint)',
                                             marginLeft: 5, fontFamily: 'IBM Plex Mono'

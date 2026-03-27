@@ -80,6 +80,7 @@ function runMigrations() {
         commercial_floors INTEGER DEFAULT 0,
         has_water_connection BOOLEAN DEFAULT 0,
         has_sewerage_connection BOOLEAN DEFAULT 0,
+        has_mosque_contribution BOOLEAN DEFAULT 1,
         upper_floors_residential BOOLEAN DEFAULT 0,
         status TEXT DEFAULT 'active',
         extra_config TEXT,
@@ -91,13 +92,13 @@ function runMigrations() {
 
       CREATE TABLE IF NOT EXISTS members (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        member_id TEXT NOT NULL UNIQUE,
         name TEXT NOT NULL,
-        cnic TEXT,
-        phone TEXT,
+        cnic TEXT NOT NULL,
+        phone TEXT NOT NULL,
         address TEXT,
         is_member BOOLEAN DEFAULT 1,
-        membership_date DATE,
-        share_count INTEGER DEFAULT 4,
+        membership_date DATE NOT NULL,
         extra_config TEXT,
         is_deleted BOOLEAN DEFAULT 0,
         notes TEXT,
@@ -128,11 +129,12 @@ function runMigrations() {
 
       CREATE TABLE IF NOT EXISTS tenants (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tenant_id TEXT NOT NULL UNIQUE,
         name TEXT NOT NULL,
-        cnic TEXT,
-        phone TEXT,
+        cnic TEXT NOT NULL,
+        phone TEXT NOT NULL,
         plot_id INTEGER NOT NULL REFERENCES plots(id),
-        start_date DATE,
+        start_date DATE NOT NULL,
         end_date DATE,
         monthly_rent DECIMAL(10,2) DEFAULT 2500,
         extra_config TEXT,
@@ -375,7 +377,7 @@ function runMigrations() {
       ['residential_vacant', 'Mosque Contribution', 500, 0, null, 3],
       ['commercial', 'Base Contribution', 1500, 0, null, 1],
       ['commercial', 'Mosque Contribution', 500, 0, null, 2],
-      ['commercial', 'Aquifer Contribution', 300, 1, 'has_water_connection', 3],
+      ['commercial', 'Aquifer Contribution', 300, 0, null, 3],
       ['commercial', 'Garbage Collection', 300, 1, 'upper_floors_residential', 4],
       ['commercial', 'Per Extra Floor', 700, 1, 'commercial_floors', 5],
     ];
@@ -974,5 +976,158 @@ function runMigrations() {
 
     db.prepare(`UPDATE settings SET value = '20' WHERE key = 'schema_version'`).run();
     currentVersion = 20;
+  }
+
+  // Migration 21: members.member_id + required member identity fields backfill
+  if (currentVersion < 21) {
+    console.log('Running migration 21 (member_id + required member identity fields)...');
+
+    const tryExec = (sql) => {
+      try { db.exec(sql); } catch (_) { /* already exists / not applicable */ }
+    };
+
+    // Add explicit member code field (distinct from internal numeric PK id)
+    tryExec(`ALTER TABLE members ADD COLUMN member_id TEXT`);
+
+    // Backfill required values for existing rows that were previously optional.
+    db.exec(`
+      UPDATE members
+      SET cnic = COALESCE(NULLIF(TRIM(cnic), ''), 'N/A')
+      WHERE cnic IS NULL OR TRIM(cnic) = ''
+    `);
+
+    db.exec(`
+      UPDATE members
+      SET phone = COALESCE(NULLIF(TRIM(phone), ''), 'N/A')
+      WHERE phone IS NULL OR TRIM(phone) = ''
+    `);
+
+    db.exec(`
+      UPDATE members
+      SET membership_date = COALESCE(NULLIF(TRIM(membership_date), ''), date('now'))
+      WHERE membership_date IS NULL OR TRIM(membership_date) = ''
+    `);
+
+    db.exec(`
+      UPDATE members
+      SET member_id = 'MEM-' || printf('%05d', id)
+      WHERE member_id IS NULL OR TRIM(member_id) = ''
+    `);
+
+    // Ensure uniqueness even if a duplicate member_id was manually entered before.
+    const duplicates = db.prepare(`
+      SELECT member_id
+      FROM members
+      WHERE member_id IS NOT NULL AND TRIM(member_id) != ''
+      GROUP BY member_id
+      HAVING COUNT(*) > 1
+    `).all();
+
+    const dupRowsStmt = db.prepare('SELECT id FROM members WHERE member_id = ? ORDER BY id ASC');
+    const fixDupStmt = db.prepare("UPDATE members SET member_id = ? || '-' || id WHERE id = ?");
+    for (const d of duplicates) {
+      const rows = dupRowsStmt.all(d.member_id);
+      for (let i = 1; i < rows.length; i++) {
+        fixDupStmt.run(d.member_id, rows[i].id);
+      }
+    }
+
+    db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_members_member_id_unique
+      ON members(member_id)
+      WHERE member_id IS NOT NULL AND TRIM(member_id) != ''
+    `);
+
+    db.prepare(`UPDATE settings SET value = '21' WHERE key = 'schema_version'`).run();
+    currentVersion = 21;
+  }
+
+  // Migration 22: mosque contribution toggle per plot + unconditional aquifer billing
+  if (currentVersion < 22) {
+    console.log('Running migration 22 (mosque toggle + unconditional aquifer)...');
+
+    const tryExec = (sql) => {
+      try { db.exec(sql); } catch (_) { /* already exists / not applicable */ }
+    };
+
+    tryExec(`ALTER TABLE plots ADD COLUMN has_mosque_contribution BOOLEAN DEFAULT 1`);
+
+    // Ensure existing records default to enabled so behavior remains backward-compatible.
+    db.exec(`
+      UPDATE plots
+      SET has_mosque_contribution = 1
+      WHERE has_mosque_contribution IS NULL
+    `);
+
+    // Water connection should no longer gate aquifer contribution.
+    db.prepare(`
+      UPDATE bill_templates
+      SET is_conditional = 0, condition_field = NULL
+      WHERE plot_type = 'commercial' AND charge_name = 'Aquifer Contribution'
+    `).run();
+
+    db.prepare(`UPDATE settings SET value = '22' WHERE key = 'schema_version'`).run();
+    currentVersion = 22;
+  }
+
+  // Migration 23: tenants.tenant_id + required tenant identity fields backfill
+  if (currentVersion < 23) {
+    console.log('Running migration 23 (tenant_id + required tenant identity fields)...');
+
+    const tryExec = (sql) => {
+      try { db.exec(sql); } catch (_) { /* already exists / not applicable */ }
+    };
+
+    tryExec(`ALTER TABLE tenants ADD COLUMN tenant_id TEXT`);
+
+    db.exec(`
+      UPDATE tenants
+      SET cnic = COALESCE(NULLIF(TRIM(cnic), ''), 'N/A')
+      WHERE cnic IS NULL OR TRIM(cnic) = ''
+    `);
+
+    db.exec(`
+      UPDATE tenants
+      SET phone = COALESCE(NULLIF(TRIM(phone), ''), 'N/A')
+      WHERE phone IS NULL OR TRIM(phone) = ''
+    `);
+
+    db.exec(`
+      UPDATE tenants
+      SET start_date = COALESCE(NULLIF(TRIM(start_date), ''), date('now'))
+      WHERE start_date IS NULL OR TRIM(start_date) = ''
+    `);
+
+    db.exec(`
+      UPDATE tenants
+      SET tenant_id = 'TEN-' || printf('%05d', id)
+      WHERE tenant_id IS NULL OR TRIM(tenant_id) = ''
+    `);
+
+    const duplicates = db.prepare(`
+      SELECT tenant_id
+      FROM tenants
+      WHERE tenant_id IS NOT NULL AND TRIM(tenant_id) != ''
+      GROUP BY tenant_id
+      HAVING COUNT(*) > 1
+    `).all();
+
+    const dupRowsStmt = db.prepare('SELECT id FROM tenants WHERE tenant_id = ? ORDER BY id ASC');
+    const fixDupStmt = db.prepare("UPDATE tenants SET tenant_id = ? || '-' || id WHERE id = ?");
+    for (const d of duplicates) {
+      const rows = dupRowsStmt.all(d.tenant_id);
+      for (let i = 1; i < rows.length; i++) {
+        fixDupStmt.run(d.tenant_id, rows[i].id);
+      }
+    }
+
+    db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_tenants_tenant_id_unique
+      ON tenants(tenant_id)
+      WHERE tenant_id IS NOT NULL AND TRIM(tenant_id) != ''
+    `);
+
+    db.prepare(`UPDATE settings SET value = '23' WHERE key = 'schema_version'`).run();
+    currentVersion = 23;
   }
 }

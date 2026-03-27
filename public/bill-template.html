@@ -4,10 +4,12 @@
     <meta charset="UTF-8">
     <title>Challan</title>
     <style>
+        @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap');
+
         /* A4 Page Layout */
         @page { size: A4; margin: 4mm; }
         body { 
-            font-family: 'Segoe UI', Arial, sans-serif; 
+            font-family: 'Poppins', 'Segoe UI', Arial, sans-serif; 
             margin: 0; padding: 0; 
             color: #333; 
             font-size: 9px; /* Base font size slightly smaller */
@@ -149,7 +151,7 @@
             font-weight: 700;
         }
 
-        /* Footer & Remarks */
+        /* Footer */
         .footer {
             margin-top: auto;
             border-top: 1px solid #ccc;
@@ -157,10 +159,34 @@
             font-size: 9px;
             color: #444;
         }
+
+        .due-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 1px 0;
+            font-weight: 600;
+        }
+
+        .due-row .due-amt {
+            font-family: 'Poppins', 'Segoe UI', Arial, sans-serif;
+            font-weight: 700;
+        }
+
+        .due-row.late {
+            color: #c00;
+        }
+
+        .remarks-label {
+            font-weight: 700;
+            color: #555;
+            margin-top: 4px;
+            margin-bottom: 1px;
+        }
         
         .remarks {
             font-style: italic;
-            height: 2.8em;
+            min-height: 2.8em;
             overflow: hidden;
             line-height: 1.2;
             color: #555;
@@ -204,7 +230,7 @@
         }
 
         @media print {
-            body { -webkit-print-color-adjust: exact; background: white; }
+            body { -webkit-print-color-adjust: exact; print-color-adjust: exact; background: white; }
             .challan-copy { border-color: #000; break-inside: avoid; }
         }
     </style>
@@ -233,31 +259,27 @@
             <div class="details-col">
                 <div class="info-row"><span class="label">Plot No:</span><span class="val" style="font-size:11px">{{PLOT_NO}}</span></div>
                 <div class="info-row"><span class="label">Member:</span><span class="val">{{MEMBER_NAME}}</span></div>
-                <div class="info-row"><span class="label">Memb #:</span><span class="val">{{MEMBERSHIP_NO}}</span></div>
+                <div class="info-row"><span class="label">Member ID:</span><span class="val">{{MEMBERSHIP_NO}}</span></div>
                 <div class="info-row"><span class="label">Challan #:</span><span class="val">{{CHALLAN_NO}}</span></div>
                 <div class="info-row"><span class="label">Month:</span><span class="val">{{BILL_MONTH}}</span></div>
                 <div class="info-row"><span class="label">Issue Date:</span><span class="val">{{ISSUED_ON}}</span></div>
                 <div class="info-row"><span class="label">Due Date:</span><span class="val" style="color:#c00">{{DUE_DATE}}</span></div>
                 <div class="info-row"><span class="label">Paid Upto:</span><span class="val">{{PAID_UPTO}}</span></div>
-                <div class="special-box">{{SPECIAL_CHARGES_SECTION}}</div>
+                {{SPECIAL_CHARGES_SECTION}}
+                <div class="remarks-label">Remarks:</div>
+                <div class="remarks">{{NOTICE_TEXT}}</div>
             </div>
 
             <div class="table-col">
                 <table class="fees-table">
                     <thead><tr><th>Description</th><th style="text-align:right">Amount (Rs)</th></tr></thead>
                     <tbody>
-                        <tr><td>Monthly Contribution</td><td class="amt">{{MONTHLY_CONTRIBUTION}}</td></tr>
-                        <tr><td>Mosque Fund</td><td class="amt">{{MOSQUE}}</td></tr>
-                        <tr><td>Garbage Charges</td><td class="amt">{{GARBAGE_CHARGES}}</td></tr>
-                        <tr><td>Aquifer Charges</td><td class="amt">{{AQUIFER_CHARGES}}</td></tr>
-                        <tr><td>Arrears</td><td class="amt">{{ARREARS}}</td></tr>
-                        <tr class="total-row"><td>Payable Within Due Date</td><td class="amt">{{PAYABLE_AMOUNT}}</td></tr>
-                        <tr class="late-row"><td>Payable After Due Date</td><td class="amt">{{PAYABLE_AFTER_DUE}}</td></tr>
+                        {{DESCRIPTION_ROWS}}
                     </tbody>
                 </table>
                 <div class="footer">
-                    <strong>Remarks:</strong>
-                    <div class="remarks">{{NOTICE_TEXT}}</div>
+                    <div class="due-row"><span>Within Due Date</span><span class="due-amt">{{PAYABLE_AMOUNT}}</span></div>
+                    <div class="due-row late"><span>After Due Date</span><span class="due-amt">{{PAYABLE_AFTER_DUE}}</span></div>
                 </div>
             </div>
         </div>
@@ -282,31 +304,27 @@
             <div class="details-col">
                 <div class="info-row"><span class="label">Plot No:</span><span class="val" style="font-size:11px">{{PLOT_NO}}</span></div>
                 <div class="info-row"><span class="label">Member:</span><span class="val">{{MEMBER_NAME}}</span></div>
-                <div class="info-row"><span class="label">Memb #:</span><span class="val">{{MEMBERSHIP_NO}}</span></div>
+                <div class="info-row"><span class="label">Member ID:</span><span class="val">{{MEMBERSHIP_NO}}</span></div>
                 <div class="info-row"><span class="label">Challan #:</span><span class="val">{{CHALLAN_NO}}</span></div>
                 <div class="info-row"><span class="label">Month:</span><span class="val">{{BILL_MONTH}}</span></div>
                 <div class="info-row"><span class="label">Issue Date:</span><span class="val">{{ISSUED_ON}}</span></div>
                 <div class="info-row"><span class="label">Due Date:</span><span class="val" style="color:#c00">{{DUE_DATE}}</span></div>
                 <div class="info-row"><span class="label">Paid Upto:</span><span class="val">{{PAID_UPTO}}</span></div>
-                <div class="special-box">{{SPECIAL_CHARGES_SECTION}}</div>
+                {{SPECIAL_CHARGES_SECTION}}
+                <div class="remarks-label">Remarks:</div>
+                <div class="remarks">{{NOTICE_TEXT}}</div>
             </div>
 
             <div class="table-col">
                 <table class="fees-table">
                      <thead><tr><th>Description</th><th style="text-align:right">Amount (Rs)</th></tr></thead>
                     <tbody>
-                        <tr><td>Monthly Contribution</td><td class="amt">{{MONTHLY_CONTRIBUTION}}</td></tr>
-                        <tr><td>Mosque Fund</td><td class="amt">{{MOSQUE}}</td></tr>
-                        <tr><td>Garbage Charges</td><td class="amt">{{GARBAGE_CHARGES}}</td></tr>
-                        <tr><td>Aquifer Charges</td><td class="amt">{{AQUIFER_CHARGES}}</td></tr>
-                        <tr><td>Arrears</td><td class="amt">{{ARREARS}}</td></tr>
-                        <tr class="total-row"><td>Within Due Date</td><td class="amt">{{PAYABLE_AMOUNT}}</td></tr>
-                        <tr class="late-row"><td>After Due Date</td><td class="amt">{{PAYABLE_AFTER_DUE}}</td></tr>
+                        {{DESCRIPTION_ROWS}}
                     </tbody>
                 </table>
                 <div class="footer">
-                    <strong>Remarks:</strong>
-                    <div class="remarks">{{NOTICE_TEXT}}</div>
+                    <div class="due-row"><span>Within Due Date</span><span class="due-amt">{{PAYABLE_AMOUNT}}</span></div>
+                    <div class="due-row late"><span>After Due Date</span><span class="due-amt">{{PAYABLE_AFTER_DUE}}</span></div>
                 </div>
             </div>
         </div>
@@ -331,31 +349,27 @@
             <div class="details-col">
                 <div class="info-row"><span class="label">Plot No:</span><span class="val" style="font-size:11px">{{PLOT_NO}}</span></div>
                 <div class="info-row"><span class="label">Member:</span><span class="val">{{MEMBER_NAME}}</span></div>
-                <div class="info-row"><span class="label">Memb #:</span><span class="val">{{MEMBERSHIP_NO}}</span></div>
+                <div class="info-row"><span class="label">Member ID:</span><span class="val">{{MEMBERSHIP_NO}}</span></div>
                 <div class="info-row"><span class="label">Challan #:</span><span class="val">{{CHALLAN_NO}}</span></div>
                 <div class="info-row"><span class="label">Month:</span><span class="val">{{BILL_MONTH}}</span></div>
                 <div class="info-row"><span class="label">Issue Date:</span><span class="val">{{ISSUED_ON}}</span></div>
                 <div class="info-row"><span class="label">Due Date:</span><span class="val" style="color:#c00">{{DUE_DATE}}</span></div>
                 <div class="info-row"><span class="label">Paid Upto:</span><span class="val">{{PAID_UPTO}}</span></div>
-                <div class="special-box">{{SPECIAL_CHARGES_SECTION}}</div>
+                {{SPECIAL_CHARGES_SECTION}}
+                <div class="remarks-label">Remarks:</div>
+                <div class="remarks">{{NOTICE_TEXT}}</div>
             </div>
 
             <div class="table-col">
                 <table class="fees-table">
                      <thead><tr><th>Description</th><th style="text-align:right">Amount (Rs)</th></tr></thead>
                     <tbody>
-                        <tr><td>Monthly Contribution</td><td class="amt">{{MONTHLY_CONTRIBUTION}}</td></tr>
-                        <tr><td>Mosque Fund</td><td class="amt">{{MOSQUE}}</td></tr>
-                        <tr><td>Garbage Charges</td><td class="amt">{{GARBAGE_CHARGES}}</td></tr>
-                        <tr><td>Aquifer Charges</td><td class="amt">{{AQUIFER_CHARGES}}</td></tr>
-                        <tr><td>Arrears</td><td class="amt">{{ARREARS}}</td></tr>
-                        <tr class="total-row"><td>Within Due Date</td><td class="amt">{{PAYABLE_AMOUNT}}</td></tr>
-                        <tr class="late-row"><td>After Due Date</td><td class="amt">{{PAYABLE_AFTER_DUE}}</td></tr>
+                        {{DESCRIPTION_ROWS}}
                     </tbody>
                 </table>
                 <div class="footer">
-                    <strong>Remarks:</strong>
-                    <div class="remarks">{{NOTICE_TEXT}}</div>
+                    <div class="due-row"><span>Within Due Date</span><span class="due-amt">{{PAYABLE_AMOUNT}}</span></div>
+                    <div class="due-row late"><span>After Due Date</span><span class="due-amt">{{PAYABLE_AFTER_DUE}}</span></div>
                 </div>
             </div>
         </div>
