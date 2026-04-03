@@ -3,6 +3,7 @@ import { Plus, DollarSign } from 'lucide-react'
 import Modal from '../components/Modal'
 
 const ipc = (window as any).ipcRenderer
+const MAX_REMARKS_LENGTH = 200
 
 export default function SpecialBillsPage() {
     const [charges, setCharges] = useState<any[]>([])
@@ -221,8 +222,17 @@ export default function SpecialBillsPage() {
                     </div>
 
                     <div className="form-group">
-                        <label>Notes</label>
-                        <textarea value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} rows={2} />
+                        <label>Notes <span style={{ color: 'var(--t-faint)', fontWeight: 400 }}>(optional, max 200)</span></label>
+                        <textarea
+                            value={form.notes}
+                            onChange={e => setForm({ ...form, notes: e.target.value.slice(0, MAX_REMARKS_LENGTH) })}
+                            rows={2}
+                            maxLength={MAX_REMARKS_LENGTH}
+                            style={{ resize: 'vertical', overflowWrap: 'anywhere', wordBreak: 'break-word', whiteSpace: 'pre-wrap' }}
+                        />
+                        <div style={{ marginTop: 4, fontSize: '0.75rem', color: 'var(--t-faint)', textAlign: 'right' }}>
+                            {(form.notes || '').length}/{MAX_REMARKS_LENGTH}
+                        </div>
                     </div>
                 </div>
                 <div className="modal-actions">

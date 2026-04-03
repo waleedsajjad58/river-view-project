@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Routes, Route, NavLink, useLocation } from 'react-router-dom'
 import {
   LayoutDashboard, CreditCard, BookOpen, Settings,
@@ -27,12 +27,46 @@ function NavLabel({ label, collapsed }: { label: string; collapsed: boolean }) {
 }
 
 export default function App() {
+  const ipc = (window as any).ipcRenderer
   const [user, setUser] = useState<any>(null)
   const [collapsed, setCollapsed] = useState(false)
+  const [zoomLevel, setZoomLevel] = useState<number>(() => {
+    const saved = Number(localStorage.getItem('app.zoomLevel') || '100')
+    if (Number.isNaN(saved)) return 100
+    return Math.min(150, Math.max(80, saved))
+  })
   const location = useLocation()
   const path = location.pathname
 
-  if (!user) return <LoginPage onLogin={setUser} />
+  useEffect(() => {
+    const applyZoom = async () => {
+      const factor = Math.min(1.5, Math.max(0.8, zoomLevel / 100))
+      try {
+        if (ipc) {
+          await ipc.invoke('app:set-zoom-factor', { factor })
+        }
+      } catch {
+        // Fallback only if IPC handler is temporarily unavailable.
+        document.body.style.zoom = `${zoomLevel}%`
+      }
+      localStorage.setItem('app.zoomLevel', String(zoomLevel))
+    }
+    applyZoom()
+  }, [zoomLevel])
+
+  const changeZoom = (delta: number) => {
+    setZoomLevel(prev => Math.min(150, Math.max(80, prev + delta)))
+  }
+
+  const handleLogin = (nextUser: any) => {
+    setUser(nextUser)
+  }
+
+  const handleLogout = () => {
+    setUser(null)
+  }
+
+  if (!user) return <LoginPage onLogin={handleLogin} />
 
   return (
     <div className="app-container">
@@ -40,7 +74,7 @@ export default function App() {
 
         <div className="sidebar-header">
           <div className="logo">RV</div>
-          {!collapsed && <h2>River View ERP</h2>}
+          {!collapsed && <h2 className="sidebar-header-title">River View ERP</h2>}
           <button className="collapse-btn" onClick={() => setCollapsed(c => !c)}>
             {collapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
           </button>
@@ -110,6 +144,21 @@ export default function App() {
         </nav>
 
         <div className="sidebar-footer">
+          <div className="footer-shortcuts">
+            <NavLink to="/settings" className={({ isActive }) => `nav-item footer-link ${isActive ? 'active' : ''}`}>
+              <Settings size={16} />{!collapsed && <span>Settings</span>}
+            </NavLink>
+          </div>
+
+          <div className="zoom-controls">
+            {!collapsed && <span className="zoom-label">Zoom {zoomLevel}%</span>}
+            <div className="zoom-actions">
+              <button className="zoom-btn" onClick={() => changeZoom(-10)} title="Zoom out">A-</button>
+              <button className="zoom-btn" onClick={() => setZoomLevel(100)} title="Reset zoom">100%</button>
+              <button className="zoom-btn" onClick={() => changeZoom(10)} title="Zoom in">A+</button>
+            </div>
+          </div>
+
           {!collapsed && (
             <div className="sidebar-user">
               <div className="sidebar-avatar">
@@ -119,7 +168,7 @@ export default function App() {
             </div>
           )}
           <button className="nav-item" style={{ color: 'var(--c-overdue)', opacity: 0.8 }}
-            onClick={() => setUser(null)} title="Logout">
+            onClick={handleLogout} title="Logout">
             <LogOut size={16} />{!collapsed && <span>Logout</span>}
           </button>
         </div>

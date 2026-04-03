@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { BookOpen, Search, TrendingUp, TrendingDown, Minus, Printer, BookMarked, ScrollText, BarChart3, ArrowRight } from 'lucide-react'
+import { BookOpen, Search, TrendingUp, TrendingDown, Minus, Printer, BookMarked, ScrollText, BarChart3, ArrowRight, Plus } from 'lucide-react'
 
 const ipc = (window as any).ipcRenderer
 const fmt  = (n: number) => `Rs. ${(n || 0).toLocaleString()}`
@@ -46,6 +46,12 @@ export default function AccountLedgerPage() {
   const [accounts,    setAccounts]    = useState<any[]>([])
   const [selected,    setSelected]    = useState<any>(null)
   const [entries,     setEntries]     = useState<any[]>([])
+  const [headings,    setHeadings]    = useState<any[]>([])
+  const [headingsLoading, setHeadingsLoading] = useState(false)
+  const [newExpenseHeader, setNewExpenseHeader] = useState('')
+  const [addingExpenseHeader, setAddingExpenseHeader] = useState(false)
+  const [expenseHeaderMsg, setExpenseHeaderMsg] = useState('')
+  const [expenseHeaderErr, setExpenseHeaderErr] = useState('')
   const [search,      setSearch]      = useState('')
   const [loading,     setLoading]     = useState(false)
   const [startDate,   setStartDate]   = useState(
@@ -76,6 +82,19 @@ export default function AccountLedgerPage() {
   }, [selected, startDate, endDate])
 
   useEffect(() => { load() }, [load])
+
+  const loadHeadings = useCallback(async () => {
+    if (!ipc) return
+    setHeadingsLoading(true)
+    try {
+      const rows = await ipc.invoke('db:get-ledger-headings-summary', { startDate, endDate })
+      setHeadings(rows || [])
+    } finally {
+      setHeadingsLoading(false)
+    }
+  }, [startDate, endDate])
+
+  useEffect(() => { loadHeadings() }, [loadHeadings])
 
   // ── Running balance ────────────────────────────────────────
   // For asset/expense: normal debit balance → debit increases, credit decreases
@@ -111,6 +130,25 @@ export default function AccountLedgerPage() {
   }, {})
 
   const typeOrder = ['asset', 'liability', 'equity', 'revenue', 'expense']
+
+  const groupedHeadings = typeOrder.reduce((acc: Record<string, any>, type) => {
+    const rows = headings.filter((h: any) => h.account_type === type)
+    const totalDebit = rows.reduce((s: number, h: any) => s + (h.total_debit || 0), 0)
+    const totalCredit = rows.reduce((s: number, h: any) => s + (h.total_credit || 0), 0)
+    acc[type] = {
+      rows,
+      totalDebit,
+      totalCredit,
+      net: totalDebit - totalCredit,
+    }
+    return acc
+  }, {})
+
+  const disconnectedHeadings = headings.filter((h: any) =>
+    Number(h.entry_count || 0) === 0 &&
+    !h.parent_id &&
+    Number(h.child_count || 0) === 0
+  )
 
   // ── Print ──────────────────────────────────────────────────
   const handlePrint = async () => {
@@ -152,6 +190,30 @@ export default function AccountLedgerPage() {
     })
 
     doc.save(`ledger-${selected.account_code}-${startDate}-${endDate}.pdf`)
+  }
+
+  const handleAddExpenseHeader = async () => {
+    const name = newExpenseHeader.trim()
+    if (!name) {
+      setExpenseHeaderErr('Enter a header name')
+      return
+    }
+
+    setAddingExpenseHeader(true)
+    setExpenseHeaderErr('')
+    setExpenseHeaderMsg('')
+    try {
+      const r = await ipc.invoke('db:add-expense-ledger-header', { name })
+      const refreshed = await ipc.invoke('db:get-accounts')
+      setAccounts(refreshed || [])
+      loadHeadings()
+      setNewExpenseHeader('')
+      setExpenseHeaderMsg(`Created ${r.accountCode} - ${name}`)
+    } catch (e: any) {
+      setExpenseHeaderErr(e.message || 'Failed to create expense header')
+    } finally {
+      setAddingExpenseHeader(false)
+    }
   }
 
   // ── Render ─────────────────────────────────────────────────
@@ -256,6 +318,28 @@ export default function AccountLedgerPage() {
               </div>
             </div>
 
+            <div style={{
+              background: '#fff', border: '1px solid var(--border)', borderRadius: 'var(--r-lg, 8px)',
+              padding: '14px 16px', marginBottom: 18,
+            }}>
+              <div style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--t-primary)', marginBottom: 8, fontFamily: 'IBM Plex Mono', letterSpacing: '0.04em' }}>
+                ADD EXPENSE LEDGER HEADER
+              </div>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <input
+                  value={newExpenseHeader}
+                  onChange={e => { setNewExpenseHeader(e.target.value); setExpenseHeaderErr(''); setExpenseHeaderMsg('') }}
+                  placeholder="e.g. Water Tanker Expenses"
+                  style={{ flex: 1, height: 34, fontSize: 12.5 }}
+                />
+                <button className="btn btn-primary" onClick={handleAddExpenseHeader} disabled={addingExpenseHeader} style={{ height: 34 }}>
+                  <Plus size={14} /> {addingExpenseHeader ? 'Adding...' : 'Add'}
+                </button>
+              </div>
+              {expenseHeaderErr && <div style={{ marginTop: 8, fontSize: 12, color: '#b91c1c' }}>{expenseHeaderErr}</div>}
+              {expenseHeaderMsg && <div style={{ marginTop: 8, fontSize: 12, color: '#15803d' }}>{expenseHeaderMsg}</div>}
+            </div>
+
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16 }}>
               {[
                 {
@@ -317,11 +401,11 @@ export default function AccountLedgerPage() {
             {accounts.length > 0 && (
               <div style={{ marginTop: 28 }}>
                 <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--t-muted)', marginBottom: 12, fontFamily: 'IBM Plex Mono', letterSpacing: '0.04em' }}>
-                  CHART OF ACCOUNTS
+                  CHART OF ACCOUNTS MASTER RECORDS ({startDate} to {endDate})
                 </div>
                 <div style={{ background: '#fff', border: '1px solid var(--border)', borderRadius: 'var(--r-lg, 8px)', overflow: 'hidden' }}>
                   {typeOrder.map(type => {
-                    const list = accounts.filter(a => a.account_type === type)
+                    const list = groupedHeadings[type]?.rows || []
                     if (!list.length) return null
                     return (
                       <div key={type} style={{ borderBottom: '1px solid var(--border)' }}>
@@ -332,11 +416,13 @@ export default function AccountLedgerPage() {
                           <span style={{ fontSize: 11, fontWeight: 700, color: typeColour[type], fontFamily: 'IBM Plex Mono', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
                             {typeLabel[type]}
                           </span>
-                          <span style={{ fontSize: 11, color: 'var(--t-faint)' }}>
-                            {list.length} account{list.length !== 1 ? 's' : ''}
-                          </span>
+                          <div style={{ display: 'flex', gap: 12, fontSize: 11, color: 'var(--t-faint)', fontFamily: 'IBM Plex Mono' }}>
+                            <span>{list.length} account{list.length !== 1 ? 's' : ''}</span>
+                            <span>Dr {fmt(groupedHeadings[type].totalDebit)}</span>
+                            <span>Cr {fmt(groupedHeadings[type].totalCredit)}</span>
+                          </div>
                         </div>
-                        {list.map(a => (
+                        {list.map((a: any) => (
                           <button key={a.id}
                             onClick={() => { setView('accounts'); setSelected(a) }}
                             style={{
@@ -354,6 +440,18 @@ export default function AccountLedgerPage() {
                             <span style={{ fontSize: 12.5, color: 'var(--t-primary)', flex: 1 }}>
                               {a.account_name}
                             </span>
+                            <span style={{ fontSize: 11, fontFamily: 'IBM Plex Mono', color: '#b91c1c', minWidth: 88, textAlign: 'right' }}>
+                              Dr {fmtN(a.total_debit || 0)}
+                            </span>
+                            <span style={{ fontSize: 11, fontFamily: 'IBM Plex Mono', color: '#15803d', minWidth: 88, textAlign: 'right' }}>
+                              Cr {fmtN(a.total_credit || 0)}
+                            </span>
+                            <span style={{ fontSize: 10.5, color: a.entry_count > 0 ? 'var(--t-faint)' : '#b91c1c', minWidth: 56, textAlign: 'right' }}>
+                              {a.entry_count > 0 ? `${a.entry_count} in` : 'No input'}
+                            </span>
+                            <span style={{ fontSize: 10.5, color: (a.parent_id || a.child_count > 0) ? 'var(--t-faint)' : '#b91c1c', minWidth: 78, textAlign: 'right' }}>
+                              {(a.parent_id || a.child_count > 0) ? 'Linked' : 'No link'}
+                            </span>
                             <ArrowRight size={12} style={{ color: 'var(--t-faint)' }} />
                           </button>
                         ))}
@@ -361,6 +459,14 @@ export default function AccountLedgerPage() {
                     )
                   })}
                 </div>
+                {headingsLoading && (
+                  <div style={{ fontSize: 12, color: 'var(--t-faint)', marginTop: 8 }}>Syncing ledger heading summaries…</div>
+                )}
+                {!headingsLoading && disconnectedHeadings.length > 0 && (
+                  <div style={{ marginTop: 12, fontSize: 12, color: '#b91c1c', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 6, padding: '8px 10px' }}>
+                    Disconnected headings detected: {disconnectedHeadings.map((d: any) => `${d.account_code} ${d.account_name}`).join(', ')}
+                  </div>
+                )}
               </div>
             )}
           </div>

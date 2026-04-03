@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import {
     Plus, X, Search, Home, User, ArrowRightLeft, History,
-    Check, Trash2, Edit2, Printer, CreditCard, FileText, RefreshCw
+    Check, Trash2, Edit2, Printer, CreditCard, RefreshCw, Landmark
 } from 'lucide-react'
 
 const ipc = (window as any).ipcRenderer
@@ -25,7 +25,7 @@ const TYPE_LABEL: Record<string, string> = {
     commercial: 'Commercial',
 }
 const emptyPlot = {
-    plot_number: '', block: '', marla_size: '5 Marla',
+    plot_number: '', marla_size: '5 Marla',
     plot_type: 'residential_vacant', commercial_floors: 0,
     has_water_connection: 0, has_sewerage_connection: 0,
     has_mosque_contribution: 1,
@@ -62,6 +62,7 @@ function StatusBadge({ status }: { status: string }) {
         partial: { label: 'Partial', cls: 'badge-partial' },
         overdue: { label: 'Overdue', cls: 'badge-overdue' },
         unpaid: { label: 'Unpaid', cls: 'badge-unpaid' },
+        voided: { label: 'Voided', cls: 'badge-gray' },
     }
     const s = map[status] || { label: status, cls: 'badge-gray' }
     return <span className={`badge ${s.cls}`}>{s.label}</span>
@@ -74,27 +75,73 @@ function PaymentPanel({ bill, detail, onClose, onSaved }: {
     bill: any, detail: any, onClose: () => void, onSaved: () => void
 }) {
     const [amount, setAmount] = useState(bill.balance_due?.toString() || '')
-    const [method, setMethod] = useState<'cash' | 'bank' | 'cheque'>('cash')
-    const [receipt, setReceipt] = useState('')
+    const [method, setMethod] = useState<'cash' | 'bank'>('cash')
+    const [bankId, setBankId] = useState('')
+    const [banks, setBanks] = useState<any[]>([])
+    const [banksLoading, setBanksLoading] = useState(false)
     const [notes, setNotes] = useState('')
     const [saving, setSaving] = useState(false)
     const [msg, setMsg] = useState('')
+    const [liveDetail, setLiveDetail] = useState<any>(detail)
     const amountRef = useRef<HTMLInputElement>(null)
 
+    const billRow = liveDetail?.bill || bill
+
     useEffect(() => { setTimeout(() => amountRef.current?.focus(), 150) }, [])
+
+    useEffect(() => { setLiveDetail(detail) }, [detail?.bill?.id])
+
+    const loadBanks = useCallback(async () => {
+        if (!ipc) return
+        setBanksLoading(true)
+        try {
+            const list = await ipc.invoke('db:get-banks')
+            setBanks(list || [])
+        } catch {
+            setBanks([])
+        } finally {
+            setBanksLoading(false)
+        }
+    }, [])
+
+    useEffect(() => {
+        loadBanks()
+        const timer = window.setInterval(loadBanks, 15000)
+        return () => window.clearInterval(timer)
+    }, [loadBanks])
+
+    useEffect(() => {
+        if (method !== 'bank') {
+            setBankId('')
+            return
+        }
+        if (!banks.length) {
+            setBankId('')
+            return
+        }
+        const stillAvailable = bankId && banks.some((bank: any) => String(bank.id) === String(bankId))
+        if (!stillAvailable) {
+            const preferredBank = banks.find((bank: any) => bank.is_default) || banks[0]
+            setBankId(preferredBank ? String(preferredBank.id) : '')
+        }
+    }, [method, banks, bankId])
 
     const handleSave = async () => {
         const amt = parseFloat(amount)
         if (!amt || amt <= 0) { setMsg('Enter a valid amount'); return }
-        if (amt > bill.balance_due + 0.01) {
-            setMsg(`Exceeds balance due (Rs. ${bill.balance_due.toLocaleString()})`); return
+        if (amt > billRow.balance_due + 0.01) {
+            setMsg(`Exceeds balance due (Rs. ${billRow.balance_due.toLocaleString()})`); return
+        }
+        if (method === 'bank' && !bankId) {
+            setMsg('Select a bank account'); return
         }
         setSaving(true)
         try {
             await ipc.invoke('db:record-payment', {
-                billId: bill.id, amount: amt,
+                billId: bill.id,
+                amount: amt,
                 paymentMethod: method,
-                receiptNumber: receipt || null,
+                bankId: method === 'bank' ? Number(bankId) : null,
                 notes: notes || null
             })
             onSaved(); onClose()
@@ -115,93 +162,111 @@ function PaymentPanel({ bill, detail, onClose, onSaved }: {
                     <button className="panel-close" onClick={onClose}><X size={16} /></button>
                 </div>
 
-                <div className="panel-body">
-                    {/* Bill summary */}
+                <div className="panel-body" style={{ display: 'grid', gap: 14 }}>
                     <div style={{
                         background: 'var(--bg-subtle)', border: '1px solid var(--border)',
-                        borderRadius: 'var(--r)', padding: '12px 14px', marginBottom: 20
+                        borderRadius: 'var(--r)', padding: '12px 14px'
                     }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
                             <div>
                                 <span style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--t-primary)' }}>
-                                    {bill.owner_name || 'No owner'}
+                                    {billRow.owner_name || 'No owner'}
                                 </span>
-                                {bill.bill_type === 'special' && (
+                                {billRow.bill_type === 'special' && (
                                     <span className="badge badge-purple" style={{ fontSize: 10, marginLeft: 8 }}>Special</span>
                                 )}
                             </div>
-                            <StatusBadge status={bill.status} />
+                            <StatusBadge status={billRow.status} />
                         </div>
-                        {detail?.items?.map((item: any) => (
-                            <div key={item.id} style={{
-                                display: 'flex', justifyContent: 'space-between',
-                                padding: '3px 0', borderTop: '1px solid var(--border)', fontSize: 12.5
-                            }}>
-                                <span style={{ color: 'var(--t-muted)' }}>{item.charge_name}</span>
-                                <span style={{ fontFamily: 'IBM Plex Mono', color: 'var(--t-secondary)' }}>
-                                    Rs. {(item.amount || 0).toLocaleString()}
-                                </span>
-                            </div>
-                        ))}
-                        <div style={{ borderTop: '1px solid var(--border-strong)', marginTop: 6, paddingTop: 6 }}>
-                            {bill.amount_paid > 0 && (
-                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 3 }}>
-                                    <span style={{ color: 'var(--t-faint)' }}>Already paid</span>
-                                    <span style={{ fontFamily: 'IBM Plex Mono', color: 'var(--c-paid)' }}>
-                                        Rs. {bill.amount_paid.toLocaleString()}
+
+                        <div style={{ display: 'grid', gap: 6 }}>
+                            {detail?.items?.map((item: any) => (
+                                <div key={item.id} style={{
+                                    display: 'grid', gridTemplateColumns: '1fr auto',
+                                    gap: 12, padding: '4px 0', borderTop: '1px solid var(--border)', fontSize: 12.5
+                                }}>
+                                    <span style={{ color: 'var(--t-muted)' }}>{item.charge_name}</span>
+                                    <span style={{ fontFamily: 'IBM Plex Mono', color: 'var(--t-secondary)' }}>
+                                        Rs. {(item.amount || 0).toLocaleString()}
                                     </span>
                                 </div>
-                            )}
-                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13.5 }}>
-                                <span style={{ fontWeight: 600 }}>Balance due</span>
-                                <span style={{ fontFamily: 'IBM Plex Mono', fontWeight: 700, color: 'var(--c-overdue)', fontSize: 15 }}>
-                                    Rs. {bill.balance_due.toLocaleString()}
-                                </span>
+                            ))}
+                            <div style={{ borderTop: '1px solid var(--border-strong)', marginTop: 6, paddingTop: 6 }}>
+                                {bill.amount_paid > 0 && (
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 3 }}>
+                                        <span style={{ color: 'var(--t-faint)' }}>Already paid</span>
+                                        <span style={{ fontFamily: 'IBM Plex Mono', color: 'var(--c-paid)' }}>
+                                            Rs. {bill.amount_paid.toLocaleString()}
+                                        </span>
+                                    </div>
+                                )}
+                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13.5 }}>
+                                    <span style={{ fontWeight: 600 }}>Balance due</span>
+                                    <span style={{ fontFamily: 'IBM Plex Mono', fontWeight: 700, color: 'var(--c-overdue)', fontSize: 15 }}>
+                                        Rs. {bill.balance_due.toLocaleString()}
+                                    </span>
+                                </div>
                             </div>
                         </div>
                     </div>
 
-                    <div className="form-group" style={{ marginBottom: 14 }}>
-                        <label>Amount Received (Rs.)</label>
-                        <input ref={amountRef} type="number" className="input-mono"
-                            value={amount} onChange={e => setAmount(e.target.value)}
-                            placeholder="0" min="0"
-                            style={{ fontSize: 18, height: 44, fontWeight: 600 }} />
-                    </div>
+                    <div style={{ display: 'grid', gap: 14, border: '1px solid var(--border-strong)', borderRadius: 10, background: 'var(--bg-subtle)', padding: '12px 14px' }}>
+                            <div className="form-group" style={{ margin: 0 }}>
+                                <label>Amount Received (Rs.)</label>
+                                <input ref={amountRef} type="number" className="input-mono"
+                                    value={amount} onChange={e => setAmount(e.target.value)}
+                                    placeholder="0" min="0"
+                                    style={{ fontSize: 18, height: 44, fontWeight: 600 }} />
+                            </div>
 
-                    <div style={{ marginBottom: 14 }}>
-                        <label style={{
-                            fontSize: 11, fontWeight: 600, color: 'var(--t-muted)',
-                            textTransform: 'uppercase', letterSpacing: '0.04em',
-                            fontFamily: 'IBM Plex Mono', display: 'block', marginBottom: 6
-                        }}>Payment Method</label>
-                        <div className="method-group">
-                            {(['cash', 'bank', 'cheque'] as const).map(m => (
-                                <button key={m}
-                                    className={`method-btn ${method === m ? 'selected' : ''}`}
-                                    onClick={() => setMethod(m)}>
-                                    {m === 'cash' ? 'Cash' : m === 'bank' ? 'Bank Transfer' : 'Cheque'}
-                                </button>
-                            ))}
-                        </div>
-                    </div>
+                            <div>
+                                <label style={{
+                                    fontSize: 11, fontWeight: 600, color: 'var(--t-muted)',
+                                    textTransform: 'uppercase', letterSpacing: '0.04em',
+                                    fontFamily: 'IBM Plex Mono', display: 'block', marginBottom: 6
+                                }}>Payment Method</label>
+                                <div className="method-group">
+                                    {(['cash', 'bank'] as const).map(m => (
+                                        <button key={m}
+                                            className={`method-btn ${method === m ? 'selected' : ''}`}
+                                            onClick={() => setMethod(m)}>
+                                            {m === 'cash' ? 'Cash' : 'Bank Transfer'}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
 
-                    <div className="form-grid">
-                        <div className="form-group">
-                            <label>Receipt No.</label>
-                            <input type="text" value={receipt} onChange={e => setReceipt(e.target.value)} placeholder="Optional" />
-                        </div>
-                        <div className="form-group">
-                            <label>Notes</label>
-                            <input type="text" value={notes} onChange={e => setNotes(e.target.value)} placeholder="Optional" />
-                        </div>
-                    </div>
+                            {method === 'bank' && (
+                                <div className="form-group" style={{ margin: 0 }}>
+                                    <label>Bank Account</label>
+                                    <select value={bankId} onChange={e => setBankId(e.target.value)} disabled={banksLoading}>
+                                        <option value="">{banksLoading ? 'Loading banks...' : banks.length ? 'Select a bank' : 'No active banks found'}</option>
+                                        {banks.map((bank: any) => (
+                                            <option key={bank.id} value={bank.id}>
+                                                {bank.bank_name}{bank.linked_account_name ? ` · ${bank.linked_account_name}` : ''}
+                                            </option>
+                                        ))}
+                                    </select>
+                                    <div style={{ fontSize: 12, color: 'var(--t-faint)', marginTop: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
+                                        <Landmark size={12} />
+                                        Bank list is live.
+                                    </div>
+                                </div>
+                            )}
 
-                    {msg && (
-                        <div className="msg msg-error" style={{ marginTop: 12 }}>
-                            <span>{msg}</span>
+                            <div className="form-grid" style={{ gridTemplateColumns: '1fr' }}>
+                                <div className="form-group" style={{ margin: 0 }}>
+                                    <label>Notes</label>
+                                    <input type="text" value={notes} onChange={e => setNotes(e.target.value)} placeholder="Optional" />
+                                </div>
+                            </div>
+
+                            {msg && (
+                                <div className="msg msg-error">
+                                    <span>{msg}</span>
+                                </div>
+                            )}
                         </div>
-                    )}
                 </div>
 
                 <div className="panel-footer">
@@ -222,6 +287,7 @@ function PaymentPanel({ bill, detail, onClose, onSaved }: {
 // ══════════════════════════════════════════════════════════════
 function PlotStatement({ plotId, onPaymentSaved }: { plotId: number, onPaymentSaved: () => void }) {
     const [data, setData] = useState<any>(null)
+    const [error, setError] = useState('')
     const [loading, setLoading] = useState(true)
     const [refreshing, setRefreshing] = useState(false)
     const [payBill, setPayBill] = useState<any>(null)
@@ -231,8 +297,15 @@ function PlotStatement({ plotId, onPaymentSaved }: { plotId: number, onPaymentSa
     const loadStatement = useCallback(async () => {
         if (!ipc || !plotId) return
         setRefreshing(true)
-        try { setData(await ipc.invoke('db:get-plot-statement', plotId)) }
-        catch (e) { console.error(e) }
+        setError('')
+        try {
+            setData(await ipc.invoke('db:get-plot-statement', plotId))
+        }
+        catch (e: any) {
+            console.error(e)
+            setData(null)
+            setError(e?.message || 'Failed to load plot statement')
+        }
         finally {
             setLoading(false)
             setRefreshing(false)
@@ -250,7 +323,7 @@ function PlotStatement({ plotId, onPaymentSaved }: { plotId: number, onPaymentSa
 
     const handlePrintUnpaid = async () => {
         if (!data || !ipc) return
-        const unpaid = data.bills.filter((b: any) => b.status !== 'paid')
+        const unpaid = data.bills.filter((b: any) => ['unpaid', 'partial', 'overdue'].includes(b.status))
         for (const b of unpaid) {
             await ipc.invoke('db:print-challan', { billId: b.id, amount: null })
         }
@@ -261,6 +334,13 @@ function PlotStatement({ plotId, onPaymentSaved }: { plotId: number, onPaymentSa
             Loading statement...
         </div>
     )
+    if (error) return (
+        <div style={{ padding: 22 }}>
+            <div className="msg msg-error">
+                <span>{error}</span>
+            </div>
+        </div>
+    )
     if (!data) return null
 
     const { summary, bills, plot } = data
@@ -269,7 +349,7 @@ function PlotStatement({ plotId, onPaymentSaved }: { plotId: number, onPaymentSa
         if (filter === 'monthly') return b.bill_type === 'monthly'
         if (filter === 'special') return b.bill_type === 'special'
         if (filter === 'general') return b.bill_type === 'general'
-        if (filter === 'unpaid') return b.status !== 'paid'
+        if (filter === 'unpaid') return ['unpaid', 'partial', 'overdue'].includes(b.status)
         return true
     })
 
@@ -410,7 +490,7 @@ function PlotStatement({ plotId, onPaymentSaved }: { plotId: number, onPaymentSa
                                 </td>
                                 <td><StatusBadge status={b.status} /></td>
                                 <td>
-                                    {(b.actual_balance ?? b.balance_due) > 0.01 && b.status !== 'paid' && (
+                                    {(b.actual_balance ?? b.balance_due) > 0.01 && ['unpaid', 'partial', 'overdue'].includes(b.status) && (
                                         <button className="btn btn-ghost btn-sm"
                                             style={{ fontSize: 11, padding: '3px 8px', color: 'var(--accent)' }}
                                             onClick={() => openPayment(b)}>
@@ -469,19 +549,12 @@ function PlotForm({ form, onChange }: { form: any, onChange: (f: any) => void })
     const maxFloors = isResidentialConstructed ? 4 : 20
     return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-            <div className="form-grid">
-                <div className="form-group">
-                    <label>Plot Number *</label>
-                    <input type="text" value={form.plot_number}
-                        onChange={e => set('plot_number', e.target.value)}
-                        placeholder="e.g. 122-A"
-                        style={{ fontFamily: 'IBM Plex Mono', fontWeight: 600 }} autoFocus />
-                </div>
-                <div className="form-group">
-                    <label>Block</label>
-                    <input type="text" value={form.block}
-                        onChange={e => set('block', e.target.value)} placeholder="optional" />
-                </div>
+            <div className="form-group">
+                <label>Plot Number *</label>
+                <input type="text" value={form.plot_number}
+                    onChange={e => set('plot_number', e.target.value)}
+                    placeholder="e.g. 122-A"
+                    style={{ fontFamily: 'IBM Plex Mono', fontWeight: 600 }} autoFocus />
             </div>
             <div className="form-grid">
                 <div className="form-group">
@@ -538,17 +611,19 @@ function PlotForm({ form, onChange }: { form: any, onChange: (f: any) => void })
                         )}
                     </div>
                     {isCommercial && (
-                        <Toggle checked={!!form.has_sewerage_connection}
-                            onChange={v => set('has_sewerage_connection', v ? 1 : 0)}
-                            label="Sewerage connection" />
+                        <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
+                            <Toggle checked={!!form.has_water_connection}
+                                onChange={v => set('has_water_connection', v ? 1 : 0)}
+                                label="Water connection" />
+                        </div>
                     )}
                 </div>
             )}
             {!isCommercial && (
                 <div style={{ display: 'flex', gap: 24, paddingTop: 4 }}>
-                    <Toggle checked={!!form.has_sewerage_connection}
-                        onChange={v => set('has_sewerage_connection', v ? 1 : 0)}
-                        label="Sewerage connection" />
+                    <Toggle checked={!!form.has_water_connection}
+                        onChange={v => set('has_water_connection', v ? 1 : 0)}
+                        label="Water connection" />
                 </div>
             )}
             <div style={{ display: 'flex', gap: 24, paddingTop: 4 }}>
@@ -603,7 +678,7 @@ function PlotInfo({ plot, owner }: { plot: any, owner: any }) {
             {row('Type', TYPE_LABEL[plot.plot_type] || plot.plot_type)}
             {(plot.plot_type === 'commercial' || plot.plot_type === 'residential_constructed') && row('Floors', `${plot.commercial_floors || 0} floor(s)`)}
             {plot.plot_type === 'commercial' && row('Upper Floors Residential', plot.upper_floors_residential ? 'Yes' : 'No')}
-            {row('Sewerage Connection', plot.has_sewerage_connection ? 'Yes' : 'No')}
+            {row('Water Connection', plot.has_water_connection ? 'Yes' : 'No')}
             {row('Mosque Contribution', plot.has_mosque_contribution ? 'Included' : 'Excluded')}
             {owner
                 ? row('Current Owner', `${owner.owner_name} (since ${owner.start_date})`)
@@ -804,6 +879,7 @@ function TenantsTab({ plot, onMsg }: { plot: any, onMsg: (m: string) => void }) 
     const [tenants, setTenants] = useState<any[]>([])
     const [showForm, setShowForm] = useState(false)
     const [editId, setEditId] = useState<number | null>(null)
+    const [expandedNotes, setExpandedNotes] = useState<Record<number, boolean>>({})
     const [form, setForm] = useState({
         tenant_id: '', name: '', cnic: '', phone: '',
         start_date: new Date().toISOString().split('T')[0],
@@ -849,6 +925,9 @@ function TenantsTab({ plot, onMsg }: { plot: any, onMsg: (m: string) => void }) 
         await load(); setShowForm(false); onMsg('Tenant removed')
     }
     const isActive = (t: any) => !t.end_date || new Date(t.end_date) >= new Date()
+    const toggleNoteExpand = (tenantId: number) => {
+        setExpandedNotes(prev => ({ ...prev, [tenantId]: !prev[tenantId] }))
+    }
 
     return (
         <div>
@@ -863,7 +942,7 @@ function TenantsTab({ plot, onMsg }: { plot: any, onMsg: (m: string) => void }) 
                     display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
                     boxShadow: 'var(--shadow-sm)'
                 }}>
-                    <div>
+                    <div style={{ flex: 1, minWidth: 0, paddingRight: 8 }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
                             <span style={{ fontWeight: 600, fontSize: 13.5 }}>{t.name}</span>
                             <span className={`badge ${isActive(t) ? 'badge-paid' : 'badge-gray'}`} style={{ fontSize: 10 }}>
@@ -877,6 +956,53 @@ function TenantsTab({ plot, onMsg }: { plot: any, onMsg: (m: string) => void }) 
                             <span style={{ fontFamily: 'IBM Plex Mono' }}>Rs. {(t.monthly_rent || 0).toLocaleString()}/mo</span>
                             {t.start_date && <span>From {t.start_date}</span>}
                         </div>
+                        {!!String(t.notes || '').trim() && (() => {
+                            const noteText = String(t.notes).trim()
+                            const showToggle = noteText.length > 140
+                            const expanded = !!expandedNotes[t.id]
+                            return (
+                                <div style={{
+                                    marginTop: 8,
+                                    background: 'var(--bg-subtle)',
+                                    border: '1px solid var(--border)',
+                                    borderRadius: 'var(--r)',
+                                    padding: '8px 10px'
+                                }}>
+                                    <div style={{
+                                        fontSize: 10,
+                                        fontWeight: 700,
+                                        textTransform: 'uppercase',
+                                        letterSpacing: '0.06em',
+                                        color: 'var(--t-faint)',
+                                        fontFamily: 'IBM Plex Mono',
+                                        marginBottom: 4
+                                    }}>
+                                        Note
+                                    </div>
+                                    <div style={{
+                                        fontSize: 12,
+                                        color: 'var(--t-secondary)',
+                                        lineHeight: 1.5,
+                                        whiteSpace: 'pre-wrap',
+                                        overflowWrap: 'anywhere',
+                                        wordBreak: 'break-word',
+                                        overflow: !expanded && showToggle ? 'hidden' : 'visible',
+                                        maxHeight: !expanded && showToggle ? '3.6em' : 'none'
+                                    }}>
+                                        {noteText}
+                                    </div>
+                                    {showToggle && (
+                                        <button
+                                            className="btn btn-ghost btn-sm"
+                                            style={{ marginTop: 6, padding: '2px 8px', fontSize: 11 }}
+                                            onClick={() => toggleNoteExpand(t.id)}
+                                        >
+                                            {expanded ? 'Show less' : 'Show more'}
+                                        </button>
+                                    )}
+                                </div>
+                            )
+                        })()}
                     </div>
                     <button className="btn btn-ghost btn-sm" onClick={() => openEdit(t)}><Edit2 size={12} /></button>
                 </div>
@@ -1044,7 +1170,6 @@ function PlotPanel({ plot, members, onClose, onSaved, onDeleted }: {
                             </div>
                             <div style={{ fontSize: 11.5, color: 'var(--t-faint)' }}>
                                 {plot.marla_size}
-                                {plot.block ? ` · ${plot.block}` : ''}
                                 {activeOwner ? ` · ${activeOwner.owner_name}` : ' · Unassigned'}
                             </div>
                         </div>
@@ -1136,13 +1261,28 @@ function PlotPanel({ plot, members, onClose, onSaved, onDeleted }: {
 // ══════════════════════════════════════════════════════════════
 function AddPlotPanel({ onClose, onSaved }: { onClose: () => void, onSaved: () => void }) {
     const [form, setForm] = useState({ ...emptyPlot })
+    const [members, setMembers] = useState<any[]>([])
+    const [assignOwnerId, setAssignOwnerId] = useState('')
+    const [ownerStartDate, setOwnerStartDate] = useState(new Date().toISOString().split('T')[0])
     const [saving, setSaving] = useState(false)
     const [err, setErr] = useState('')
+
+    useEffect(() => {
+        if (!ipc) return
+        ipc.invoke('db:get-members').then((rows: any[]) => setMembers(rows || [])).catch(() => setMembers([]))
+    }, [])
 
     const handleSave = async () => {
         if (!form.plot_number.trim()) { setErr('Plot number is required'); return }
         setSaving(true)
-        try { await ipc.invoke('db:add-plot', form); onSaved() }
+        try {
+            await ipc.invoke('db:add-plot', {
+                ...form,
+                assignOwnerId: assignOwnerId || null,
+                ownerStartDate,
+            })
+            onSaved()
+        }
         catch (e: any) { setErr(e.message || 'Failed to save'); setSaving(false) }
     }
 
@@ -1155,6 +1295,40 @@ function AddPlotPanel({ onClose, onSaved }: { onClose: () => void, onSaved: () =
                 </div>
                 <div className="panel-body">
                     <PlotForm form={form} onChange={setForm} />
+                    <div style={{
+                        marginTop: 14,
+                        background: 'var(--bg-subtle)',
+                        border: '1px solid var(--border)',
+                        borderRadius: 'var(--r-lg)',
+                        padding: '12px 14px'
+                    }}>
+                        <div style={{
+                            fontSize: 10,
+                            fontWeight: 700,
+                            textTransform: 'uppercase',
+                            letterSpacing: '0.06em',
+                            color: 'var(--t-faint)',
+                            fontFamily: 'IBM Plex Mono',
+                            marginBottom: 8
+                        }}>
+                            Assign Current Owner (Optional)
+                        </div>
+                        <div className="form-grid">
+                            <div className="form-group">
+                                <label>Owner</label>
+                                <select value={assignOwnerId} onChange={e => setAssignOwnerId(e.target.value)}>
+                                    <option value="">No owner now</option>
+                                    {members.map((m: any) => (
+                                        <option key={m.id} value={m.id}>{m.name}</option>
+                                    ))}
+                                </select>
+                            </div>
+                            <div className="form-group">
+                                <label>Start Date</label>
+                                <input type="date" value={ownerStartDate} onChange={e => setOwnerStartDate(e.target.value)} disabled={!assignOwnerId} />
+                            </div>
+                        </div>
+                    </div>
                     {err && (
                         <div className="msg msg-error" style={{ marginTop: 14 }}>
                             <span>{err}</span>
@@ -1209,7 +1383,6 @@ export default function PlotsPage() {
         .filter(p => !filterType || p.plot_type === filterType)
         .filter(p => !q ||
             p.plot_number?.toLowerCase().includes(q) ||
-            p.block?.toLowerCase().includes(q) ||
             p.owner_name?.toLowerCase().includes(q))
 
     const counts = {
@@ -1255,7 +1428,7 @@ export default function PlotsPage() {
                 <div className="table-search">
                     <Search size={14} style={{ color: 'var(--t-faint)' }} />
                     <input value={search} onChange={e => setSearch(e.target.value)}
-                        placeholder="Search plot number, block, owner..." />
+                        placeholder="Search plot number, owner..." />
                     {search && (
                         <button onClick={() => setSearch('')} style={{
                             background: 'none', border: 'none', cursor: 'pointer',
@@ -1268,7 +1441,6 @@ export default function PlotsPage() {
                     <thead>
                         <tr>
                             <th style={{ width: 90 }}>Plot #</th>
-                            <th style={{ width: 80 }}>Block</th>
                             <th style={{ width: 90 }}>Size</th>
                             <th>Type</th>
                             <th>Owner</th>
@@ -1277,12 +1449,12 @@ export default function PlotsPage() {
                     </thead>
                     <tbody>
                         {loading ? (
-                            <tr><td colSpan={6} style={{
+                            <tr><td colSpan={5} style={{
                                 textAlign: 'center', padding: 36,
                                 color: 'var(--t-faint)', fontSize: 13
                             }}>Loading...</td></tr>
                         ) : displayed.length === 0 ? (
-                            <tr><td colSpan={6} style={{
+                            <tr><td colSpan={5} style={{
                                 textAlign: 'center', padding: 40,
                                 color: 'var(--t-faint)', fontSize: 13
                             }}>
@@ -1295,7 +1467,6 @@ export default function PlotsPage() {
                                         {p.plot_number}
                                     </span>
                                 </td>
-                                <td style={{ color: 'var(--t-muted)', fontSize: 12.5 }}>{p.block || '—'}</td>
                                 <td style={{ fontFamily: 'IBM Plex Mono', fontSize: 12, color: 'var(--t-muted)' }}>
                                     {p.marla_size}
                                 </td>

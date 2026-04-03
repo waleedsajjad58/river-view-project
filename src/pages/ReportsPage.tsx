@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Download, TrendingUp, FileText, Layers, RefreshCw } from 'lucide-react'
+import { Download, TrendingUp, FileText, Layers, RefreshCw, Scale } from 'lucide-react'
 import { exportExcelFile } from '../utils/exportExcel'
 
 const ipc = (window as any).ipcRenderer
@@ -642,22 +642,13 @@ function FundSummaryReport() {
 
   useEffect(() => { load() }, [load])
 
-  // Split into monthly vs special
-  const MONTHLY_CHARGES = [
-    'Monthly Contribution', 'Base Contribution',
-    'Mosque Contribution', 'Mosque Fund',
-    'Garbage Collection', 'Garbage Charges',
-    'Aquifer Contribution', 'Aquifer Charges',
-    'Monthly Tenant Challan',
-  ]
-  const monthly = data.filter(r =>
-    r.bill_type === 'monthly' || r.bill_type === 'tenant' ||
-    MONTHLY_CHARGES.includes(r.charge_name)
-  )
-  const special = data.filter(r =>
-    r.bill_type === 'special' &&
-    !MONTHLY_CHARGES.includes(r.charge_name)
-  )
+    // Backend now returns strict sectioning + normalized charge names.
+    const monthly = data
+        .filter(r => r.section === 'monthly')
+        .sort((a, b) => b.total_collected - a.total_collected || a.charge_name.localeCompare(b.charge_name))
+    const special = data
+        .filter(r => r.section === 'special')
+        .sort((a, b) => b.total_collected - a.total_collected || a.charge_name.localeCompare(b.charge_name))
 
   const monthlyTotal  = monthly.reduce((s, r) => s + r.total_collected, 0)
   const specialTotal  = special.reduce((s, r) => s + r.total_collected, 0)
@@ -671,13 +662,12 @@ function FundSummaryReport() {
         <tr>
           <th>Charge / Fund</th>
           <th style={{ textAlign: 'right' }}>Collected (Rs.)</th>
-          <th style={{ textAlign: 'right' }}>Outstanding (Rs.)</th>
-          <th style={{ width: 160 }}>Share</th>
+                    <th style={{ width: 160 }}>Share</th>
         </tr>
       </thead>
       <tbody>
         {rows.length === 0 ? (
-          <tr><td colSpan={4} className="empty-row">No data for this period</td></tr>
+                    <tr><td colSpan={3} className="empty-row">No data for this period</td></tr>
         ) : rows.map((r, i) => {
           const pct = sectionTotal > 0 ? (r.total_collected / sectionTotal) * 100 : 0
           return (
@@ -686,10 +676,6 @@ function FundSummaryReport() {
               <td style={{ textAlign: 'right', fontFamily: 'IBM Plex Mono',
                 fontWeight: 600, color: 'var(--c-paid)' }}>
                 {fmt(r.total_collected)}
-              </td>
-              <td style={{ textAlign: 'right', fontFamily: 'IBM Plex Mono',
-                color: r.total_outstanding > 0 ? 'var(--c-overdue)' : 'var(--t-faint)' }}>
-                {r.total_outstanding > 0 ? fmt(r.total_outstanding) : '—'}
               </td>
               <td>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -713,10 +699,6 @@ function FundSummaryReport() {
           <td>Total</td>
           <td style={{ textAlign: 'right', fontFamily: 'IBM Plex Mono',
             color: 'var(--c-paid)' }}>{fmt(sectionTotal)}</td>
-          <td style={{ textAlign: 'right', fontFamily: 'IBM Plex Mono',
-            color: 'var(--c-overdue)' }}>
-            {fmt(rows.reduce((s, r) => s + r.total_outstanding, 0))}
-          </td>
           <td />
         </tr>
       </tfoot>
@@ -738,7 +720,7 @@ function FundSummaryReport() {
         </button>
         <button className="btn btn-ghost" style={{ marginLeft: 'auto' }}
           onClick={() => exportTableExcel('fund-summary', 'Fund Summary', data,
-            ['Charge', 'Type', 'Collected', 'Outstanding'])}>
+                        ['Charge', 'Type', 'Collected'])}>
           <Download size={16} /> Export Excel
         </button>
       </div>

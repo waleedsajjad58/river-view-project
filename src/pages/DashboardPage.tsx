@@ -7,9 +7,32 @@ const ipc = (window as any).ipcRenderer
 const MO = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 const fmt = (n: number) => `Rs. ${n.toLocaleString()}`
 
+function useVisibilityPreference(key: string, defaultVisible = false, alwaysHideOnMount = false) {
+    const [visible, setVisible] = useState<boolean>(() => {
+        if (alwaysHideOnMount) return false
+        try {
+            const raw = localStorage.getItem(`dashboard.visibility.${key}`)
+            return raw === null ? defaultVisible : raw === '1'
+        } catch {
+            return defaultVisible
+        }
+    })
+
+    useEffect(() => {
+        try {
+            localStorage.setItem(`dashboard.visibility.${key}`, visible ? '1' : '0')
+        } catch {
+            // Ignore localStorage failures and keep in-memory state.
+        }
+    }, [key, visible])
+
+    return [visible, setVisible] as const
+}
+
 /* ── Dashboard Card Component ──────────────────────────── */
-function DashboardCard({ title, subtitle, rightElement, children }: any) {
-    const [visible, setVisible] = useState(true)
+function DashboardCard({ title, subtitle, rightElement, children, storageKey }: any) {
+    const prefKey = storageKey || String(title)
+    const [visible, setVisible] = useVisibilityPreference(prefKey, false, true)
     return (
         <div className="card">
             <div className="card-header">
@@ -36,8 +59,9 @@ function DashboardCard({ title, subtitle, rightElement, children }: any) {
     )
 }
 
-function CollapsibleSection({ title, children }: any) {
-    const [visible, setVisible] = useState(true)
+function CollapsibleSection({ title, children, storageKey }: any) {
+    const sectionKey = storageKey || String(title)
+    const [visible, setVisible] = useVisibilityPreference(`section.${sectionKey}`, false, true)
     return (
         <div style={{ marginBottom: 16 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
@@ -197,7 +221,7 @@ export default function DashboardPage({ user }: Props) {
             </div>
 
             {/* ── KPI strip ── */}
-            <CollapsibleSection title="Overview">
+            <CollapsibleSection title="Overview" storageKey="overview">
                 <div className="kpi-grid">
                     {!loaded ? [0, 1, 2, 3].map(i => <KpiSkeleton key={i} />) : (
                         <>
@@ -256,20 +280,22 @@ export default function DashboardPage({ user }: Props) {
             </CollapsibleSection>
 
             {/* ── Quick actions ── */}
-            <div style={{ display: 'flex', gap: '0.75rem', marginBottom: '1.25rem' }}>
-                <button className="btn btn-primary" onClick={() => nav('/billing?tab=generate')}>
-                    <Zap size={14} /> Generate This Month's Bills
-                </button>
-                <button className="btn btn-ghost" onClick={() => nav('/billing')}>
-                    <CreditCard size={14} /> Collect Payment
-                </button>
-            </div>
+            <CollapsibleSection title="Quick Actions" storageKey="quick-actions">
+                <div style={{ display: 'flex', gap: '0.75rem', marginBottom: '1.25rem' }}>
+                    <button className="btn btn-primary" onClick={() => nav('/billing?tab=generate')}>
+                        <Zap size={14} /> Generate This Month's Bills
+                    </button>
+                    <button className="btn btn-ghost" onClick={() => nav('/billing')}>
+                        <CreditCard size={14} /> Collect Payment
+                    </button>
+                </div>
+            </CollapsibleSection>
 
             {/* ── Charts row ── */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: 16, marginBottom: 20 }}>
 
                 {/* Bar chart */}
-                <DashboardCard title={`Monthly Collection — ${yr}`} rightElement={<span style={{ fontSize: 11, fontFamily: 'IBM Plex Mono', color: 'var(--t-faint)' }}>YTD {fmt(ytd)}</span>}>
+                <DashboardCard storageKey="monthly-collection" title={`Monthly Collection — ${yr}`} rightElement={<span style={{ fontSize: 11, fontFamily: 'IBM Plex Mono', color: 'var(--t-faint)' }}>YTD {fmt(ytd)}</span>}>
                     <div style={{ padding: '12px 8px 10px' }}>
                         <ResponsiveContainer width="100%" height={155}>
                             <BarChart data={chart} barSize={14} margin={{ top: 4, right: 4, left: -24, bottom: 0 }}>
@@ -286,7 +312,7 @@ export default function DashboardPage({ user }: Props) {
                 </DashboardCard>
 
                 {/* Bill status */}
-                <DashboardCard title="Bill Status" rightElement={<span style={{ fontSize: 11, fontFamily: 'IBM Plex Mono', color: 'var(--t-faint)' }}>{stats.totalBills || 0} total</span>}>
+                <DashboardCard storageKey="bill-status" title="Bill Status" rightElement={<span style={{ fontSize: 11, fontFamily: 'IBM Plex Mono', color: 'var(--t-faint)' }}>{stats.totalBills || 0} total</span>}>
                     <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 14 }}>
                         {[
                             { label: 'Paid', n: stats.paidBills || 0, color: 'var(--c-paid)' },
@@ -320,7 +346,7 @@ export default function DashboardPage({ user }: Props) {
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
 
                 {/* Defaulters */}
-                <DashboardCard title="Defaulters" rightElement={
+                <DashboardCard storageKey="defaulters" title="Defaulters" rightElement={
                     <button onClick={() => nav('/reports')} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 11, color: 'var(--accent)', fontFamily: 'IBM Plex Mono', display: 'flex', alignItems: 'center', gap: 3 }}>
                         View report <ArrowRight size={11} />
                     </button>
@@ -355,7 +381,7 @@ export default function DashboardPage({ user }: Props) {
                 </DashboardCard>
 
                 {/* Recent expenses */}
-                <DashboardCard title="Recent Expenses" rightElement={
+                <DashboardCard storageKey="recent-expenses" title="Recent Expenses" rightElement={
                     <button onClick={() => nav('/expenditures')} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 11, color: 'var(--accent)', fontFamily: 'IBM Plex Mono', display: 'flex', alignItems: 'center', gap: 3 }}>
                         View all <ArrowRight size={11} />
                     </button>

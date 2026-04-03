@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 const ipc = (window as any).ipcRenderer
 
@@ -6,6 +6,11 @@ export default function LoginPage({ onLogin }: { onLogin: (user: any) => void })
     const [pin,     setPin]     = useState('')
     const [error,   setError]   = useState('')
     const [loading, setLoading] = useState(false)
+    const hiddenInputRef = useRef<HTMLInputElement>(null)
+
+    useEffect(() => {
+        hiddenInputRef.current?.focus()
+    }, [])
 
     const handleLogin = async () => {
         if (pin.length < 4) { setError('PIN must be at least 4 digits'); return }
@@ -30,9 +35,9 @@ export default function LoginPage({ onLogin }: { onLogin: (user: any) => void })
 
     return (
         <div style={{
-            minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center',
+            minHeight: '100vh', width: '100vw', display: 'flex', alignItems: 'center', justifyContent: 'center',
             background: 'var(--bg-subtle)', fontFamily: 'var(--font)'
-        }}>
+        }} onClick={() => hiddenInputRef.current?.focus()}>
             <div style={{ width: 360, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 28 }}>
 
                 {/* Logo + title */}
@@ -72,19 +77,19 @@ export default function LoginPage({ onLogin }: { onLogin: (user: any) => void })
                         ))}
                     </div>
 
-                    {/* Hidden keyboard input */}
+                    {/* Hidden keyboard input (keeps physical keyboard support) */}
                     <input
+                        ref={hiddenInputRef}
                         type="password"
                         value={pin}
                         onChange={e => { setError(''); setPin(e.target.value.replace(/\D/g,'').slice(0,6)) }}
                         onKeyDown={e => e.key === 'Enter' && handleLogin()}
-                        autoFocus
                         style={{
-                            width: '100%', height: 40, textAlign: 'center', letterSpacing: '0.5rem',
-                            fontSize: 16, marginBottom: 16, borderRadius: 'var(--r)',
-                            border: '1px solid var(--border-strong)', background: 'var(--bg-subtle)',
-                            color: 'var(--t-primary)', fontFamily: 'var(--font-mono)', outline: 'none',
-                            boxSizing: 'border-box'
+                            position: 'absolute',
+                            opacity: 0,
+                            width: 1,
+                            height: 1,
+                            pointerEvents: 'none'
                         }}
                         maxLength={6}
                     />
@@ -132,10 +137,6 @@ export default function LoginPage({ onLogin }: { onLogin: (user: any) => void })
                     >
                         {loading ? 'Verifying…' : 'Login'}
                     </button>
-                </div>
-
-                <div style={{ fontSize: 11.5, color: 'var(--t-faint)', fontFamily: 'var(--font-mono)' }}>
-                    Default PIN: 1234
                 </div>
             </div>
         </div>

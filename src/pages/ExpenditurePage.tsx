@@ -4,8 +4,8 @@ import { Plus, X, RotateCcw, Download, Search, Check, AlertTriangle } from 'luci
 const ipc = (window as any).ipcRenderer
 const fmt = (n: number) => `Rs. ${(n || 0).toLocaleString()}`
 
-// ── Built-in categories — clerk recognises these immediately ──
-const BUILTIN_CATEGORIES = [
+// ── Fallback categories (used only if master list load fails) ──
+const DEFAULT_CATEGORIES = [
     'Salaries',
     'Generator / Fuel',
     'Maintenance & Repairs',
@@ -40,22 +40,20 @@ const BUILTIN_CATEGORIES = [
     'Repair & Maintenance of Internal Roads',
     'Miscellaneous Expenses',
     'Unexpected Expenses',
-    'Other',
 ]
 
 const PAYMENT_METHODS = [
     { value: 'cash', label: 'Cash' },
     { value: 'bank', label: 'Bank Transfer' },
-    { value: 'cheque', label: 'Cheque' },
 ]
 
 const empty = {
     expenditureDate: new Date().toISOString().split('T')[0],
     category: '',
-    customCategory: '',
     description: '',
     amount: '',
-    paymentMethod: 'cash' as 'cash' | 'bank' | 'cheque',
+    paymentMethod: 'cash' as 'cash' | 'bank',
+    bankId: '',
     vendorName: '',
     receiptNumber: '',
     accountId: '',
@@ -83,8 +81,8 @@ function PanelShell({ width=480, children }: { width?:number; children:React.Rea
 
 // ── Inline slide-down form (not a modal) ─────────────────────
 function ExpenseForm({
-    onSaved, onCancel
-}: { accounts: any[], onSaved: () => void, onCancel: () => void }) {
+    onSaved, onCancel, banks, categories
+}: { accounts: any[], banks: any[], categories: string[], onSaved: () => void, onCancel: () => void }) {
     const [f, setF] = useState({ ...empty })
     const [cashBalance, setCashBalance] = useState(0)
     const [bankBalance, setBankBalance] = useState(0)
@@ -107,7 +105,7 @@ function ExpenseForm({
         })
     }, [])
 
-    const category = f.category === 'Other (custom)' ? f.customCategory : f.category
+    const category = f.category
     const canSave = !!category && !!f.description && parseFloat(f.amount) > 0 && !!f.expenditureDate
 
     const handleSave = async () => {
@@ -124,6 +122,7 @@ function ExpenseForm({
                 description: f.description,
                 amount: amt,
                 paymentMethod: f.paymentMethod,
+                bankId: f.paymentMethod === 'bank' ? (f.bankId ? Number(f.bankId) : null) : null,
                 vendorName: f.vendorName || null,
                 receiptNumber: f.receiptNumber || null,
                 accountId: f.accountId || null,
@@ -136,7 +135,10 @@ function ExpenseForm({
     }
 
     // What journal entry will be posted — shown to user before they save
-    const cashLabel = f.paymentMethod === 'bank' ? 'Allied Bank (1001)' : 'Cash in Hand (1000)'
+    const selectedBank = banks.find((b: any) => String(b.id) === String(f.bankId))
+    const cashLabel = f.paymentMethod === 'bank'
+        ? `${selectedBank?.bank_name || 'Bank Account'}${selectedBank?.account_code ? ` (${selectedBank.account_code})` : ''}`
+        : 'Cash in Hand (1000)'
 
     return (
     <PanelShell width={500}>
@@ -156,29 +158,14 @@ function ExpenseForm({
                     <div className="form-group">
                         <label>Category</label>
                         <select value={f.category}
-                            onChange={e => setF({ ...f, category: e.target.value, customCategory: '' })}>
+                            onChange={e => setF({ ...f, category: e.target.value })}>
                             <option value="">Select category...</option>
-                            {BUILTIN_CATEGORIES.map(c => (
-                                <option key={c} value={c === 'Other' ? 'Other (custom)' : c}>
-                                    {c}
-                                </option>
+                            {categories.map(c => (
+                                <option key={c} value={c}>{c}</option>
                             ))}
                         </select>
                     </div>
                 </div>
-
-                {/* Custom category input — only shown when "Other" is selected */}
-                {f.category === 'Other (custom)' && (
-                    <div className="form-group" style={{ marginBottom: 14 }}>
-                        <label>Custom Category Name</label>
-                        <input type="text"
-                            value={f.customCategory}
-                            onChange={e => setF({ ...f, customCategory: e.target.value })}
-                            placeholder="e.g. Fumigation, Water tanker, Event..."
-                            autoFocus
-                        />
-                    </div>
-                )}
 
                 {/* Row 2: Description (full width) */}
                 <div className="form-group" style={{ marginBottom: 14 }}>
@@ -220,6 +207,23 @@ function ExpenseForm({
                         </div>
                     </div>
                 </div>
+
+                {f.paymentMethod === 'bank' && (
+                    <div className="form-group" style={{ marginBottom: 14 }}>
+                        <label>Select Bank Account</label>
+                        <select
+                            value={f.bankId}
+                            onChange={e => setF({ ...f, bankId: e.target.value })}
+                        >
+                            <option value="">Default bank</option>
+                            {banks.map((b: any) => (
+                                <option key={b.id} value={b.id}>
+                                    {b.bank_name}{b.account_code ? ` (${b.account_code})` : ''}
+                                </option>
+                            ))}
+                        </select>
+                    </div>
+                )}
 
                 {/* Row 4: Vendor + Receipt (optional) */}
                 <div className="form-grid" style={{ marginBottom: 14 }}>
@@ -405,6 +409,8 @@ export default function ExpenditurePage() {
     const [search, setSearch] = useState('')
     const [expenditures, setExp] = useState<any[]>([])
     const [accounts, setAccounts] = useState<any[]>([])
+    const [categoryOptions, setCategoryOptions] = useState<string[]>(DEFAULT_CATEGORIES)
+    const [banks, setBanks] = useState<any[]>([])
     const [showForm, setShowForm] = useState(false)
     const [selected, setSelected] = useState<any>(null)
     const [msg, setMsg] = useState('')
@@ -415,15 +421,20 @@ export default function ExpenditurePage() {
         if (!ipc) return
         setLoading(true)
         try {
-            const [exps, accs] = await Promise.all([
+            const [exps, accs, bankRows, catMaster] = await Promise.all([
                 ipc.invoke('db:get-expenditures', {
                     startDate, endDate,
                     category: catFilter || undefined
                 }),
                 ipc.invoke('db:get-accounts'),
+                ipc.invoke('db:get-banks'),
+                ipc.invoke('db:get-expense-category-master'),
             ])
             setExp(exps)
             setAccounts(accs.filter((a: any) => a.account_type === 'expense'))
+            setBanks(bankRows || [])
+            const opts = (catMaster || []).map((r: any) => r.category_name).filter(Boolean)
+            setCategoryOptions(opts.length ? opts : DEFAULT_CATEGORIES)
         } catch (e) { console.error(e) }
         finally { setLoading(false) }
     }, [startDate, endDate, catFilter])
@@ -494,6 +505,8 @@ export default function ExpenditurePage() {
                 <ModalOverlay onClose={() => setShowForm(false)}>
                     <ExpenseForm
                         accounts={accounts}
+                        banks={banks}
+                        categories={categoryOptions}
                         onSaved={() => { setShowForm(false); load(); showSuccess('Expenditure posted') }}
                         onCancel={() => setShowForm(false)}
                     />

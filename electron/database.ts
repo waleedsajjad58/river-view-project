@@ -375,11 +375,11 @@ function runMigrations() {
       ['residential_vacant', 'Monthly Contribution', 5000, 0, null, 1],
       ['residential_vacant', 'Aquifer Contribution', 300, 0, null, 2],
       ['residential_vacant', 'Mosque Contribution', 500, 0, null, 3],
-      ['commercial', 'Base Contribution', 1500, 0, null, 1],
-      ['commercial', 'Mosque Contribution', 500, 0, null, 2],
-      ['commercial', 'Aquifer Contribution', 300, 1, 'has_water_connection', 3],
-      ['commercial', 'Garbage Collection', 300, 1, 'upper_floors_residential', 4],
-      ['commercial', 'Per Extra Floor', 700, 1, 'commercial_floors', 5],
+      ['commercial', 'Contribution for Commercial property - Rs. 1500/- per month for vacant and single story', 1500, 0, null, 1],
+      ['commercial', 'Contribution for Mosque', 500, 0, null, 2],
+      ['commercial', 'Contribution for Aquifer if water connection is provided', 300, 1, 'has_water_connection', 3],
+      ['commercial', 'Contribution for garbage collection if upper stories are used for residential purpose', 300, 1, 'upper_floors_residential', 4],
+      ['commercial', 'Contribution for each constructed story other than ground floor', 700, 1, 'commercial_floors', 5],
     ]
     for (const t of templates) {
       insertTemplate.run(t[0], t[1], t[2], t[3], t[4], t[5])

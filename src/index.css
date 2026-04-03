@@ -29,8 +29,8 @@
   /* Text */
   --t-primary: #111111;
   --t-secondary: #2f3a4b;
-  --t-muted: #4b5563;
-  --t-faint: #667085;
+  --t-muted: #000000;
+  --t-faint: #000000;
   --t-accent: #1d4ed8;
 
   /* Accent */
@@ -79,7 +79,7 @@
   --shadow-card: 0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.04);
 
   --text:        #111111;
-  --text-muted:  #4b5563;
+  --text-muted:  #000000;
   --success:     #15803d;
   --warning:     #b45309;
   --danger:      #b91c1c;
@@ -95,7 +95,7 @@
 }
 
 html {
-  font-size: 14px;
+  font-size: 19px;
 }
 
 body {
@@ -150,9 +150,9 @@ h1, h2, h3, h4, h5, h6 {
 .sidebar-header {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 0 14px;
-  height: 52px;
+  gap: 8px;
+  padding: 0 12px;
+  height: 50px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
@@ -174,13 +174,14 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .sidebar-header-title {
-  font-size: 13px;
+  font-size: 12.5px;
   font-weight: 600;
   color: var(--t-primary);
   white-space: nowrap;
   overflow: hidden;
   flex: 1;
   letter-spacing: -0.01em;
+  line-height: 1.2;
 }
 
 .collapse-btn {
@@ -205,11 +206,21 @@ h1, h2, h3, h4, h5, h6 {
   overflow-y: auto;
   overflow-x: hidden;
   padding: 8px 0;
-  scrollbar-width: none;
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 transparent;
 }
 
 .sidebar-nav::-webkit-scrollbar {
-  display: none;
+  width: 8px;
+}
+
+.sidebar-nav::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 999px;
+}
+
+.sidebar-nav::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 .nav-section-label {
@@ -313,6 +324,67 @@ h1, h2, h3, h4, h5, h6 {
   padding: 6px 0;
 }
 
+.footer-shortcuts {
+  padding: 0 0 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 6px;
+}
+
+.footer-link {
+  height: 30px;
+}
+
+.zoom-controls {
+  padding: 6px 12px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.zoom-label {
+  display: block;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--t-faint);
+  margin-bottom: 6px;
+}
+
+.zoom-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.zoom-btn {
+  height: 28px;
+  min-width: 42px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border-strong);
+  background: #fff;
+  color: var(--t-primary);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0 8px;
+}
+
+.zoom-btn:hover {
+  background: var(--bg-hover);
+}
+
+.collapsed .zoom-controls {
+  padding: 6px;
+}
+
+.collapsed .zoom-actions {
+  flex-direction: column;
+  gap: 4px;
+}
+
+.collapsed .zoom-btn {
+  min-width: 100%;
+  height: 24px;
+  font-size: 10px;
+  padding: 0;
+}
+
 .sidebar-user {
   padding: 6px 14px;
   display: flex;
@@ -410,6 +482,7 @@ h1, h2, h3, h4, h5, h6 {
   font-size: 12px;
   font-weight: 500;
   margin-top: 3px;
+  opacity: 0.96;
 }
 
 .header-actions {
@@ -1145,6 +1218,7 @@ select:focus {
   font-size: 12.5px;
   color: var(--t-faint);
   margin-bottom: 28px;
+  opacity: 0.96;
 }
 
 .pin-dots {

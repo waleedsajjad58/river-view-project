@@ -26,7 +26,7 @@
   /* Text — neutral zinc palette */
   --text-primary: #fafafa;
   --text-secondary: #c4c7d0;
-  --text-muted: #a6abb6;
+  --text-muted: #000000;
   --text-accent: #4ade80;
 
   /* Borders — flat zinc */
@@ -48,7 +48,6 @@
   --badge-partial-color: #eab308;
   --badge-overdue-bg: rgba(239, 68, 68, 0.10);
   --badge-overdue-color: #ef4444;
-  --badge-unpaid-bg: rgba(113, 113, 122, 0.10);
   --badge-unpaid-color: #71717a;
 
   /* Typography */
@@ -77,7 +76,7 @@
   --t-primary: var(--text-primary);
   --t-secondary: var(--text-secondary);
   --t-muted: var(--text-muted);
-  --t-faint: #9ca3af;
+  --t-faint: #000000;
   --c-paid: var(--success);
   --c-partial: var(--warning);
   --c-overdue: var(--danger);
@@ -93,13 +92,12 @@
 }
 
 html {
-  font-size: 14px;
+  font-size: 19px;
 }
 
 body {
   font-family: var(--font-ui);
   background: var(--bg-primary);
-  color: var(--text-primary);
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
@@ -121,7 +119,7 @@ h1, h2, h3, h4, h5, h6 {
 
 /* ── App Shell ─────────────────────────────────────────────── */
 .app-container {
-  display: flex;
+    opacity: 0.92;
   width: 100%;
   height: 100vh;
   overflow: hidden;
@@ -131,6 +129,7 @@ h1, h2, h3, h4, h5, h6 {
 .sidebar {
   width: var(--sidebar-width);
   min-width: var(--sidebar-width);
+    opacity: 0.96;
   background: var(--sidebar-bg);
   border-right: 1px solid var(--sidebar-border);
   display: flex;
@@ -221,7 +220,7 @@ h1, h2, h3, h4, h5, h6 {
   letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--text-muted);
-  opacity: 0.6;
+  opacity: 0.92;
   padding: 1.5rem 1rem 0.5rem;
   white-space: nowrap;
   overflow: hidden;
@@ -437,6 +436,7 @@ h1, h2, h3, h4, h5, h6 {
   color: var(--text-muted);
   font-size: 0.82rem;
   margin-top: 0.35rem;
+  opacity: 0.96;
 }
 
 .header-actions {
@@ -1259,6 +1259,7 @@ select:focus {
 .login-brand p {
   font-size: 0.85rem;
   color: var(--text-muted);
+  opacity: 0.96;
 }
 
 .login-card {

@@ -44,11 +44,37 @@ function pick(items, pattern) {
         .reduce((s, i) => s + (Number(i.amount) || 0), 0);
 }
 
-function normalizeChargeLabel(chargeName) {
+function normalizeChargeLabel(chargeName, billRow = null, amount = 0) {
   const raw = String(chargeName || '').trim();
+  const lower = raw.toLowerCase();
   if (!raw) return 'Charge';
   if (/monthly tenant challan/i.test(raw)) return 'Monthly Tenant Challan';
-  if (/monthly contribution|base contribution/i.test(raw)) return 'Monthly Contribution';
+
+  if (
+    lower === 'monthly contribution' ||
+    lower.includes('contribution for commercial property') ||
+    lower === 'base contribution'
+  ) {
+    return billRow?.plot_type === 'commercial'
+      ? 'Monthly Contribution (Commercial)'
+      : 'Monthly Contribution';
+  }
+
+  if (
+    lower.includes('contribution for each constructed story other than ground floor') ||
+    lower.includes('per extra floor') ||
+    lower.includes('additional floor charges') ||
+    lower.includes('per floor contribution')
+  ) {
+    const floors = Number(billRow?.commercial_floors || 0);
+    if (floors > 0) return `Per Floor Contribution (${floors} floor${floors === 1 ? '' : 's'})`;
+    const inferredFloors = Math.round((Number(amount) || 0) / 700);
+    if (inferredFloors > 0 && Math.abs((Number(amount) || 0) - (inferredFloors * 700)) < 0.01) {
+      return `Per Floor Contribution (${inferredFloors} floor${inferredFloors === 1 ? '' : 's'})`;
+    }
+    return 'Per Floor Contribution';
+  }
+
   if (/mosque/i.test(raw)) return 'Mosque Fund';
   if (/garbage/i.test(raw)) return 'Garbage Charges';
   if (/aquifer/i.test(raw)) return 'Aquifer Charges';
@@ -58,7 +84,9 @@ function normalizeChargeLabel(chargeName) {
 
 function chargeSortPriority(label) {
   if (/^monthly tenant challan$/i.test(label)) return 1;
+  if (/^monthly contribution \(commercial\)$/i.test(label)) return 1;
   if (/^monthly contribution$/i.test(label)) return 1;
+  if (/^per floor contribution/i.test(label)) return 2;
   if (/^mosque fund$/i.test(label)) return 2;
   if (/^garbage charges$/i.test(label)) return 3;
   if (/^aquifer charges$/i.test(label)) return 4;
@@ -115,6 +143,8 @@ export function generateChallanHTML(billId, customAmount = null, printRemarks = 
         SELECT
             b.*,
             p.plot_number,
+          p.plot_type,
+          p.commercial_floors,
         COALESCE(
           m.member_id,
           (
@@ -228,7 +258,7 @@ export function generateChallanHTML(billId, customAmount = null, printRemarks = 
 
     const groupedItems = Object.values(
       items.reduce((acc, i) => {
-        const label = normalizeChargeLabel(i.charge_name);
+        const label = normalizeChargeLabel(i.charge_name, row, i.amount);
         if (!acc[label]) acc[label] = { label, amount: 0 };
         acc[label].amount += Number(i.amount) || 0;
         return acc;
@@ -268,27 +298,24 @@ export function generateChallanHTML(billId, customAmount = null, printRemarks = 
         return [
           ...fixedRows,
           ...extraRows,
-          rowHtml('Payable Within Due Date', payable, 'total-row'),
-          rowHtml('Payable After Due Date', fmt(payableAfterDue), 'late-row'),
         ].join('');
       }
 
       return [
         ...groupedItems.map((i) => rowHtml(escapeHtml(i.label), fmt(i.amount))),
         showArrearsRow ? rowHtml('Arrears', fmt(row.arrears)) : null,
-        rowHtml('Payable Within Due Date', payable, 'total-row'),
-        rowHtml('Payable After Due Date', fmt(payableAfterDue), 'late-row'),
       ].filter(Boolean).join('');
     })();
     const specialSection = '';
 
     const html = readFileSync(resolveTemplatePath(), 'utf8');
 
+    const clampRemarks = (value) => String(value || '').trim().slice(0, 200)
     const remarksSource = (typeof printRemarks === 'string' && printRemarks.trim())
-      ? printRemarks.trim()
-      : (row.notice || '');
+      ? clampRemarks(printRemarks)
+      : clampRemarks(row.notice || '')
     const remarksHtml = remarksSource
-      ? `<div style="margin-top:3px;white-space:pre-wrap;">${escapeHtml(remarksSource).replace(/\n/g, '<br>')}</div>`
+      ? `<div style="margin-top:3px;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;">${escapeHtml(remarksSource).replace(/\n/g, '<br>')}</div>`
       : '';
 
     return html

@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Landmark, RefreshCw, Printer, Plus, X, Building2 } from 'lucide-react'
+import { Landmark, RefreshCw, Printer, Plus, X, Building2, FileDown } from 'lucide-react'
+import { exportExcelFile } from '../utils/exportExcel'
 
 const ipc = (window as any).ipcRenderer
 
@@ -14,6 +15,20 @@ interface Bank {
   account_code: string
   is_default: number
   is_active: number
+}
+
+interface AddBankResult {
+  success: boolean
+  bankId: number
+}
+
+interface TransferHistoryRow {
+  id: number
+  entry_date: string
+  description: string
+  transfer_type: 'cash_to_bank' | 'bank_to_cash' | 'transfer'
+  amount: number
+  bank_name: string
 }
 
 export default function CashToBankPage() {
@@ -54,12 +69,24 @@ export default function CashToBankPage() {
   const [btcSaving, setBtcSaving] = useState(false)
   const [btcMsg, setBtcMsg] = useState<{ text: string; ok: boolean } | null>(null)
 
-  const loadBanks = useCallback(async () => {
+  // Transfer history (date range)
+  const [historyFrom, setHistoryFrom] = useState(new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0])
+  const [historyTo, setHistoryTo] = useState(now.toISOString().split('T')[0])
+  const [historyRows, setHistoryRows] = useState<TransferHistoryRow[]>([])
+  const [historyLoading, setHistoryLoading] = useState(false)
+  const [historyError, setHistoryError] = useState<string | null>(null)
+
+  const loadBanks = useCallback(async (preferredBankId?: number) => {
     if (!ipc) return
     setLoadingBanks(true)
     try {
       const data = await ipc.invoke('db:get-banks')
       setBanks(data || [])
+      if (preferredBankId && data?.some((b: Bank) => b.id === preferredBankId)) {
+        setCtbBankId(preferredBankId)
+        setBtcBankId(preferredBankId)
+        return
+      }
       // Set default bank if not already set
       const defaultBank = data?.find((b: Bank) => b.is_default)
       if (defaultBank) {
@@ -86,10 +113,62 @@ export default function CashToBankPage() {
     setBankBalance(bank || 0)
   }, [])
 
+  const loadTransferHistory = useCallback(async () => {
+    if (!ipc) return
+    if (historyFrom && historyTo && historyFrom > historyTo) {
+      setHistoryRows([])
+      setHistoryError('From date cannot be after To date')
+      return
+    }
+    setHistoryLoading(true)
+    setHistoryError(null)
+    try {
+      try {
+        const rows = await ipc.invoke('db:get-cash-bank-transfers', {
+          startDate: historyFrom,
+          endDate: historyTo,
+        })
+        setHistoryRows(rows || [])
+      } catch (innerErr: any) {
+        const msg = String(innerErr?.message || innerErr || '')
+        if (!msg.includes("No handler registered for 'db:get-cash-bank-transfers'")) {
+          throw innerErr
+        }
+
+        // Backward-compat fallback for running main process that has not loaded the new IPC yet.
+        const cashbookRows = await ipc.invoke('db:get-cashbook', {
+          startDate: historyFrom,
+          endDate: historyTo,
+        })
+
+        const mapped: TransferHistoryRow[] = (cashbookRows || [])
+          .filter((r: any) => (
+            (Number(r.cash_out) > 0 && Number(r.bank_in) > 0)
+            || (Number(r.cash_in) > 0 && Number(r.bank_out) > 0)
+          ))
+          .map((r: any) => ({
+            id: Number(r.id),
+            entry_date: r.entry_date || '',
+            description: r.description || '',
+            transfer_type: Number(r.cash_out) > 0 && Number(r.bank_in) > 0 ? 'cash_to_bank' : 'bank_to_cash',
+            amount: Number(r.cash_out) > 0 && Number(r.bank_in) > 0 ? Number(r.bank_in || 0) : Number(r.cash_in || 0),
+            bank_name: '',
+          }))
+
+        setHistoryRows(mapped)
+      }
+    } catch (e: any) {
+      setHistoryError(e?.message || 'Failed to load transfer history')
+    } finally {
+      setHistoryLoading(false)
+    }
+  }, [historyFrom, historyTo])
+
   useEffect(() => { 
     loadBalances()
     loadBanks()
-  }, [loadBalances, loadBanks])
+    loadTransferHistory()
+  }, [loadBalances, loadBanks, loadTransferHistory])
 
   const handleAddBank = async () => {
     if (!newBankName.trim()) {
@@ -99,18 +178,18 @@ export default function CashToBankPage() {
     setAddingBank(true)
     setAddBankMsg(null)
     try {
-      await ipc.invoke('db:add-bank', {
+      const result = await ipc.invoke('db:add-bank', {
         bankName: newBankName.trim(),
         accountNumber: newAccountNumber.trim() || undefined,
         branchName: newBranchName.trim() || undefined,
         iban: newIban.trim() || undefined,
-      })
+      }) as AddBankResult
       setAddBankMsg({ text: 'Bank added successfully!', ok: true })
       setNewBankName('')
       setNewAccountNumber('')
       setNewBranchName('')
       setNewIban('')
-      loadBanks()
+      await loadBanks(result?.bankId)
       setTimeout(() => setShowAddBank(false), 1000)
     } catch (e: any) {
       setAddBankMsg({ text: e.message, ok: false })
@@ -135,6 +214,7 @@ export default function CashToBankPage() {
       setCtbMsg({ text: `Rs. ${amount.toLocaleString()} transferred to ${bankName}`, ok: true })
       setCtbAmount(''); setCtbNotes('')
       loadBalances()
+      loadTransferHistory()
     } catch (e: any) { setCtbMsg({ text: e.message, ok: false }) }
     finally { setCtbSaving(false) }
   }
@@ -166,6 +246,7 @@ export default function CashToBankPage() {
       setBtcPurpose('')
       setBtcNotes('')
       loadBalances()
+      loadTransferHistory()
     } catch (e: any) { setBtcMsg({ text: e.message, ok: false }) }
     finally { setBtcSaving(false) }
   }
@@ -187,8 +268,45 @@ export default function CashToBankPage() {
     }
   }
 
+  const exportTransferHistoryExcel = async () => {
+    if (!historyRows.length) return
+
+    const totalCashToBank = historyRows
+      .filter(r => r.transfer_type === 'cash_to_bank')
+      .reduce((s, r) => s + Number(r.amount || 0), 0)
+    const totalBankToCash = historyRows
+      .filter(r => r.transfer_type === 'bank_to_cash')
+      .reduce((s, r) => s + Number(r.amount || 0), 0)
+    const grandTotal = historyRows.reduce((s, r) => s + Number(r.amount || 0), 0)
+
+    const rows: (string | number)[][] = historyRows.map((row, index) => ([
+      index + 1,
+      row.entry_date || '',
+      row.transfer_type === 'cash_to_bank' ? 'Cash to Bank' : row.transfer_type === 'bank_to_cash' ? 'Bank to Cash' : 'Transfer',
+      row.bank_name || '',
+      row.description || '',
+      Number(row.amount) || 0,
+    ]))
+
+    rows.push([])
+    rows.push(['', '', '', '', 'Total Cash to Bank', totalCashToBank])
+    rows.push(['', '', '', '', 'Total Bank to Cash', totalBankToCash])
+    rows.push(['', '', '', '', 'Grand Total', grandTotal])
+
+    await exportExcelFile({
+      fileName: `cash-bank-transfer-history-${historyFrom}-to-${historyTo}`,
+      sheetName: 'Cash-Bank Transfers',
+      title: 'River View Cooperative Housing Society Ltd.',
+      subtitle: `Cash/Bank Transfer History - ${historyFrom} to ${historyTo}`,
+      meta: [`Generated: ${new Date().toLocaleDateString('en-PK')} | Entries: ${historyRows.length}`],
+      headers: ['Sr', 'Date', 'Type', 'Bank', 'Description', 'Amount (Rs.)'],
+      rows,
+      numericColumns: [1, 6],
+    })
+  }
+
   return (
-    <div className="page" style={{ padding: '32px 28px', overflowY: 'auto' }}>
+    <div className="page" style={{ padding: '32px 28px', overflowY: 'auto', fontSize: 14, lineHeight: 1.6 }}>
       <div style={{ marginBottom: 24 }}>
         <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--t-primary)', letterSpacing: '-0.01em' }}>
           Cash to Bank Transfer
@@ -198,28 +316,28 @@ export default function CashToBankPage() {
         </div>
       </div>
 
-      <div style={{ maxWidth: 820 }}>
-        <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+      <div style={{ maxWidth: 860 }}>
+        <div style={{ display: 'inline-flex', gap: 6, marginBottom: 12, padding: 4, background: '#f3f4f6', borderRadius: 999 }}>
           <button
             className={activeTab === 'ctb' ? 'btn btn-primary' : 'btn btn-ghost'}
-            style={{ height: 32, fontSize: 12.5 }}
+            style={{ height: 32, fontSize: 12.5, borderRadius: 999, boxShadow: activeTab === 'ctb' ? '0 1px 2px rgba(0,0,0,0.12)' : 'none' }}
             onClick={() => setActiveTab('ctb')}
           >
             Cash to Bank
           </button>
           <button
             className={activeTab === 'btc' ? 'btn btn-primary' : 'btn btn-ghost'}
-            style={{ height: 32, fontSize: 12.5 }}
+            style={{ height: 32, fontSize: 12.5, borderRadius: 999, boxShadow: activeTab === 'btc' ? '0 1px 2px rgba(0,0,0,0.12)' : 'none' }}
             onClick={() => setActiveTab('btc')}
           >
             Bank to Cash
           </button>
         </div>
 
-        <div style={{ background: '#fff', border: '1px solid var(--border)', borderRadius: 'var(--r-lg, 8px)', overflow: 'hidden' }}>
-          <div style={{ padding: '14px 20px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 10 }}>
-            <div style={{ width: 32, height: 32, borderRadius: 6, background: '#fffbeb', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <Landmark size={17} style={{ color: '#b45309' }} />
+        <div style={{ background: '#fff', border: '1px solid var(--border)', borderRadius: 'var(--r-lg, 8px)', overflow: 'hidden', marginBottom: 20 }}>
+          <div style={{ padding: '20px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 10 }}>
+            <div style={{ width: 32, height: 32, borderRadius: 6, background: '#dbeafe', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <Landmark size={17} style={{ color: '#1d4ed8' }} />
             </div>
             <div>
               <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--t-primary)' }}>
@@ -234,33 +352,33 @@ export default function CashToBankPage() {
           </div>
 
           {/* Balances */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 1, background: 'var(--border)' }}>
-            <div style={{ background: '#fff', padding: '12px 20px' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr' }}>
+            <div style={{ background: '#fff', padding: '20px', borderRight: '1px solid var(--border)' }}>
               <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--t-faint)', letterSpacing: '0.06em', fontFamily: 'IBM Plex Mono', marginBottom: 4 }}>CASH IN HAND</div>
-              <div style={{ fontSize: 16, fontWeight: 700, fontFamily: 'IBM Plex Mono', color: '#1d4ed8' }}>Rs. {cashBalance.toLocaleString()}</div>
+              <div style={{ fontSize: 23, fontWeight: 700, fontFamily: 'IBM Plex Mono', color: '#b45309' }}>Rs. {cashBalance.toLocaleString()}</div>
             </div>
-            <div style={{ background: '#fff', padding: '12px 20px' }}>
+            <div style={{ background: '#fff', padding: '20px' }}>
               <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--t-faint)', letterSpacing: '0.06em', fontFamily: 'IBM Plex Mono', marginBottom: 4 }}>BANK BALANCE</div>
-              <div style={{ fontSize: 16, fontWeight: 700, fontFamily: 'IBM Plex Mono', color: '#b45309' }}>Rs. {bankBalance.toLocaleString()}</div>
+              <div style={{ fontSize: 23, fontWeight: 700, fontFamily: 'IBM Plex Mono', color: '#1d4ed8' }}>Rs. {bankBalance.toLocaleString()}</div>
             </div>
           </div>
 
           {activeTab === 'ctb' && (
             <>
-              <div style={{ padding: '16px 20px', display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap', borderTop: '1px solid var(--border)' }}>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--t-faint)' }}>Date</label>
+              <div style={{ padding: '20px', marginBottom: 16, display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap', borderTop: '1px solid var(--border)' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <label style={{ fontSize: 12, fontWeight: 500, color: '#6b7280' }}>Date</label>
                   <input type="date" value={ctbDate} onChange={e => setCtbDate(e.target.value)}
                     style={{ height: 34, fontSize: 12.5, width: 145 }} />
                 </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--t-faint)' }}>Amount (Rs.)</label>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <label style={{ fontSize: 12, fontWeight: 500, color: '#6b7280' }}>Amount (Rs.)</label>
                   <input type="number" value={ctbAmount} onChange={e => setCtbAmount(e.target.value)}
                     placeholder="0" min="0"
                     style={{ height: 34, fontSize: 12.5, fontFamily: 'IBM Plex Mono', fontWeight: 600, width: 140 }} />
                 </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--t-faint)' }}>Bank</label>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <label style={{ fontSize: 12, fontWeight: 500, color: '#6b7280' }}>Bank</label>
                   <div style={{ display: 'flex', gap: 4 }}>
                     <select 
                       value={ctbBankId || ''} 
@@ -290,15 +408,15 @@ export default function CashToBankPage() {
                     </button>
                   </div>
                 </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1, minWidth: 150 }}>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--t-faint)' }}>Notes <span style={{ fontWeight: 400 }}>(optional)</span></label>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, flex: 1, minWidth: 150 }}>
+                  <label style={{ fontSize: 12, fontWeight: 500, color: '#6b7280' }}>Notes <span style={{ fontWeight: 400 }}>(optional)</span></label>
                   <input type="text" value={ctbNotes} onChange={e => setCtbNotes(e.target.value)}
                     placeholder="e.g. March collections deposit"
                     style={{ height: 34, fontSize: 12.5 }} />
                 </div>
                 <button className="btn btn-primary" onClick={handleCashToBank} disabled={ctbSaving}
-                  style={{ height: 34, fontSize: 12.5, whiteSpace: 'nowrap' }}>
-                  {ctbSaving ? <><RefreshCw size={14} className="spin" /> Saving…</> : <><Landmark size={14} /> Transfer</>}
+                  style={{ height: 38, fontSize: 13, whiteSpace: 'nowrap', marginLeft: 'auto', padding: '0 24px' }}>
+                  {ctbSaving ? 'Saving...' : 'Transfer'}
                 </button>
                 {ctbAmount && parseFloat(ctbAmount) > 0 && (
                   <button className="btn btn-ghost" style={{ height: 34, fontSize: 12.5, whiteSpace: 'nowrap' }}
@@ -322,20 +440,20 @@ export default function CashToBankPage() {
 
           {activeTab === 'btc' && (
             <>
-              <div style={{ padding: '16px 20px', display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap', borderTop: '1px solid var(--border)' }}>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--t-faint)' }}>Date</label>
+              <div style={{ padding: '20px', marginBottom: 16, display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap', borderTop: '1px solid var(--border)' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <label style={{ fontSize: 12, fontWeight: 500, color: '#6b7280' }}>Date</label>
                   <input type="date" value={btcDate} onChange={e => setBtcDate(e.target.value)}
                     style={{ height: 34, fontSize: 12.5, width: 145 }} />
                 </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--t-faint)' }}>Amount (Rs.)</label>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <label style={{ fontSize: 12, fontWeight: 500, color: '#6b7280' }}>Amount (Rs.)</label>
                   <input type="number" value={btcAmount} onChange={e => setBtcAmount(e.target.value)}
                     placeholder="0" min="0"
                     style={{ height: 34, fontSize: 12.5, fontFamily: 'IBM Plex Mono', fontWeight: 600, width: 140 }} />
                 </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--t-faint)' }}>Bank</label>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <label style={{ fontSize: 12, fontWeight: 500, color: '#6b7280' }}>Bank</label>
                   <div style={{ display: 'flex', gap: 4 }}>
                     <select 
                       value={btcBankId || ''} 
@@ -365,8 +483,8 @@ export default function CashToBankPage() {
                     </button>
                   </div>
                 </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--t-faint)' }}>Transfer Mode</label>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <label style={{ fontSize: 12, fontWeight: 500, color: '#6b7280' }}>Transfer Mode</label>
                   <select value={btcMode} onChange={e => setBtcMode(e.target.value as 'cheque' | 'online')}
                     style={{ height: 34, fontSize: 12.5, width: 150 }}>
                     <option value="cheque">Cheque Cashed</option>
@@ -374,29 +492,29 @@ export default function CashToBankPage() {
                   </select>
                 </div>
                 {btcMode === 'cheque' && (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                    <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--t-faint)' }}>Cheque No.</label>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    <label style={{ fontSize: 12, fontWeight: 500, color: '#6b7280' }}>Cheque No.</label>
                     <input type="text" value={btcChequeNo} onChange={e => setBtcChequeNo(e.target.value)}
                       placeholder="Enter cheque number"
                       style={{ height: 34, fontSize: 12.5, width: 160 }} />
                   </div>
                 )}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1, minWidth: 170 }}>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--t-faint)' }}>Purpose</label>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, flex: 1, minWidth: 170 }}>
+                  <label style={{ fontSize: 12, fontWeight: 500, color: '#6b7280' }}>Purpose</label>
                   <input type="text" value={btcPurpose} onChange={e => setBtcPurpose(e.target.value)}
                     placeholder="e.g. petty cash for office expenses"
                     style={{ height: 34, fontSize: 12.5 }} />
                 </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1, minWidth: 150 }}>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--t-faint)' }}>Notes <span style={{ fontWeight: 400 }}>(optional)</span></label>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, flex: 1, minWidth: 150 }}>
+                  <label style={{ fontSize: 12, fontWeight: 500, color: '#6b7280' }}>Notes <span style={{ fontWeight: 400 }}>(optional)</span></label>
                   <input type="text" value={btcNotes} onChange={e => setBtcNotes(e.target.value)}
                     placeholder="Additional detail"
                     style={{ height: 34, fontSize: 12.5 }} />
                 </div>
 
                 <button className="btn btn-primary" onClick={handleBankToCash} disabled={btcSaving}
-                  style={{ height: 34, fontSize: 12.5, whiteSpace: 'nowrap' }}>
-                  {btcSaving ? <><RefreshCw size={14} className="spin" /> Saving…</> : <><Landmark size={14} /> Transfer</>}
+                  style={{ height: 38, fontSize: 13, whiteSpace: 'nowrap', marginLeft: 'auto', padding: '0 24px' }}>
+                  {btcSaving ? 'Saving...' : 'Transfer'}
                 </button>
                 {btcAmount && parseFloat(btcAmount) > 0 && btcPurpose.trim() && (btcMode === 'online' || btcChequeNo.trim()) && (
                   <button className="btn btn-ghost" style={{ height: 34, fontSize: 12.5, whiteSpace: 'nowrap' }}
@@ -418,6 +536,89 @@ export default function CashToBankPage() {
               )}
             </>
           )}
+        </div>
+
+        <div style={{ marginTop: 0, background: '#fff', border: '1px solid var(--border)', borderRadius: 'var(--r-lg, 8px)', overflow: 'hidden' }}>
+          <div style={{ padding: '20px', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <div>
+              <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--t-primary)' }}>Transfer History</div>
+              <div style={{ fontSize: 11.5, color: 'var(--t-faint)' }}>Cash to bank and bank to cash transactions</div>
+            </div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <label style={{ fontSize: 12, fontWeight: 500, color: '#6b7280' }}>From</label>
+                <input type="date" value={historyFrom} onChange={e => setHistoryFrom(e.target.value)} style={{ height: 32, fontSize: 12 }} />
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <label style={{ fontSize: 12, fontWeight: 500, color: '#6b7280' }}>To</label>
+                <input type="date" value={historyTo} onChange={e => setHistoryTo(e.target.value)} style={{ height: 32, fontSize: 12 }} />
+              </div>
+              <button className="btn btn-ghost" style={{ height: 32, fontSize: 12.5 }} onClick={loadTransferHistory}>
+                <RefreshCw size={13} /> Refresh
+              </button>
+              <button className="btn btn-ghost" style={{ height: 32, fontSize: 12.5 }} onClick={exportTransferHistoryExcel} disabled={historyLoading || historyRows.length === 0}>
+                <FileDown size={13} /> Export Excel
+              </button>
+            </div>
+          </div>
+
+          <div style={{ overflowX: 'auto', borderTop: '1px solid var(--border)' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 14, lineHeight: 1.6, border: '1px solid var(--border)' }}>
+              <thead>
+                <tr style={{ background: '#f8fafc' }}>
+                  <th style={{ textAlign: 'left', padding: '10px 20px', borderBottom: '1px solid var(--border)', borderRight: '1px solid var(--border)', fontSize: 11, color: '#9ca3af', letterSpacing: '0.04em', textTransform: 'uppercase' }}>Date</th>
+                  <th style={{ textAlign: 'left', padding: '10px 20px', borderBottom: '1px solid var(--border)', borderRight: '1px solid var(--border)', fontSize: 11, color: '#9ca3af', letterSpacing: '0.04em', textTransform: 'uppercase' }}>Type</th>
+                  <th style={{ textAlign: 'left', padding: '10px 20px', borderBottom: '1px solid var(--border)', borderRight: '1px solid var(--border)', fontSize: 11, color: '#9ca3af', letterSpacing: '0.04em', textTransform: 'uppercase' }}>Bank</th>
+                  <th style={{ textAlign: 'left', padding: '10px 20px', borderBottom: '1px solid var(--border)', borderRight: '1px solid var(--border)', fontSize: 11, color: '#9ca3af', letterSpacing: '0.04em', textTransform: 'uppercase' }}>Description</th>
+                  <th style={{ textAlign: 'right', padding: '10px 20px', borderBottom: '1px solid var(--border)', fontSize: 11, color: '#9ca3af', letterSpacing: '0.04em', textTransform: 'uppercase' }}>Amount (Rs.)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {historyLoading && (
+                  <tr>
+                    <td colSpan={5} style={{ padding: '12px', color: 'var(--t-faint)' }}>Loading transfer history...</td>
+                  </tr>
+                )}
+                {!historyLoading && historyError && (
+                  <tr>
+                    <td colSpan={5} style={{ padding: '12px', color: '#b91c1c' }}>{historyError}</td>
+                  </tr>
+                )}
+                {!historyLoading && !historyError && historyRows.length === 0 && (
+                  <tr>
+                    <td colSpan={5} style={{ padding: '12px', color: 'var(--t-faint)' }}>No transactions found for selected dates</td>
+                  </tr>
+                )}
+                {!historyLoading && !historyError && historyRows.map((row, index) => (
+                  <tr key={row.id} style={{ background: index % 2 === 0 ? '#ffffff' : '#f9fafb' }}>
+                    <td style={{ padding: '10px 20px', borderTop: '1px solid var(--border)', borderRight: '1px solid var(--border)', fontFamily: 'IBM Plex Mono' }}>{row.entry_date}</td>
+                    <td style={{ padding: '10px 20px', borderTop: '1px solid var(--border)', borderRight: '1px solid var(--border)' }}>
+                      <span style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        padding: '2px 8px',
+                        borderRadius: 999,
+                        fontSize: 11,
+                        fontWeight: 600,
+                        color: row.transfer_type === 'cash_to_bank' ? '#1d4ed8' : '#b45309',
+                        background: row.transfer_type === 'cash_to_bank' ? '#eff6ff' : '#fffbeb',
+                        border: `1px solid ${row.transfer_type === 'cash_to_bank' ? '#bfdbfe' : '#fde68a'}`,
+                      }}>
+                        {row.transfer_type === 'cash_to_bank' ? 'Cash to Bank' : row.transfer_type === 'bank_to_cash' ? 'Bank to Cash' : 'Transfer'}
+                      </span>
+                    </td>
+                    <td style={{ padding: '10px 20px', borderTop: '1px solid var(--border)', borderRight: '1px solid var(--border)' }}>{row.bank_name || '-'}</td>
+                    <td style={{ padding: '10px 20px', borderTop: '1px solid var(--border)', borderRight: '1px solid var(--border)', maxWidth: 340, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={row.description || ''}>
+                      {row.description || '-'}
+                    </td>
+                    <td style={{ padding: '10px 20px', borderTop: '1px solid var(--border)', textAlign: 'right', fontFamily: 'IBM Plex Mono', fontWeight: 600 }}>
+                      {Number(row.amount || 0).toLocaleString()}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
 
       </div>

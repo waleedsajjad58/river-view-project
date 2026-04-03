@@ -52,8 +52,22 @@ function StatusBadge({ status }: { status: string }) {
 }
 
 // ── Member form (reused for add + edit) ───────────────────────
-function MemberForm({ form, onChange }: { form: any, onChange: (f: any) => void }) {
+function MemberForm({
+    form,
+    onChange,
+    assignablePlots,
+    ownedPlotIds = []
+}: {
+    form: any,
+    onChange: (f: any) => void,
+    assignablePlots: any[],
+    ownedPlotIds?: number[]
+}) {
     const set = (k: string, v: any) => onChange({ ...form, [k]: v })
+    const sanitizeCnic = (v: string) => v.replace(/\D/g, '').slice(0, 13)
+    const sanitizePhone = (v: string) => v.replace(/\D/g, '').slice(0, 11)
+    const selectedPlotId = Number(form.assign_plot_id || 0)
+    const alreadyOwned = selectedPlotId > 0 && ownedPlotIds.includes(selectedPlotId)
     return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
             {/* Row 1 */}
@@ -80,7 +94,10 @@ function MemberForm({ form, onChange }: { form: any, onChange: (f: any) => void 
                 <div className="form-group">
                     <label>CNIC *</label>
                     <input type="text" value={form.cnic}
-                        onChange={e => set('cnic', e.target.value)}
+                        onChange={e => set('cnic', sanitizeCnic(e.target.value))}
+                        inputMode="numeric"
+                        pattern="[0-9]*"
+                        maxLength={13}
                         placeholder="35201-1234567-1"
                         style={{ fontFamily: 'IBM Plex Mono', letterSpacing: '0.02em' }}
                     />
@@ -88,7 +105,10 @@ function MemberForm({ form, onChange }: { form: any, onChange: (f: any) => void 
                 <div className="form-group">
                     <label>Phone *</label>
                     <input type="text" value={form.phone}
-                        onChange={e => set('phone', e.target.value)}
+                        onChange={e => set('phone', sanitizePhone(e.target.value))}
+                        inputMode="numeric"
+                        pattern="[0-9]*"
+                        maxLength={11}
                         placeholder="0300-1234567"
                         style={{ fontFamily: 'IBM Plex Mono' }}
                     />
@@ -97,18 +117,60 @@ function MemberForm({ form, onChange }: { form: any, onChange: (f: any) => void 
             {/* Row 3 */}
             <div className="form-grid">
                 <div className="form-group">
-                    <label>Address</label>
-                    <input type="text" value={form.address}
-                        onChange={e => set('address', e.target.value)}
-                        placeholder="House / Street / Area"
-                    />
-                </div>
-                <div className="form-group">
                     <label>Membership Date *</label>
                     <input type="date" value={form.membership_date}
                         onChange={e => set('membership_date', e.target.value)} />
                 </div>
             </div>
+            {/* Optional plot assignment */}
+            <div style={{
+                background: 'var(--bg-subtle)', border: '1px solid var(--border)',
+                borderRadius: 'var(--r-lg)', padding: '12px 14px'
+            }}>
+                <div style={{
+                    fontSize: 10, fontWeight: 700, textTransform: 'uppercase',
+                    letterSpacing: '0.07em', color: 'var(--t-faint)',
+                    fontFamily: 'IBM Plex Mono', marginBottom: 10
+                }}>
+                    Plot Assignment (Optional)
+                </div>
+                <div className="form-grid">
+                    <div className="form-group">
+                        <label>Assign Plot</label>
+                        <select
+                            value={form.assign_plot_id || ''}
+                            onChange={e => set('assign_plot_id', e.target.value)}
+                        >
+                            <option value="">No plot assignment</option>
+                            {assignablePlots.map((p: any) => (
+                                <option key={p.id} value={p.id}>
+                                    Plot {p.plot_number}{p.block ? ` (${p.block})` : ''}
+                                </option>
+                            ))}
+                        </select>
+                        {assignablePlots.length === 0 && (
+                            <span style={{ fontSize: 11, color: 'var(--t-faint)', marginTop: 3 }}>
+                                No unassigned plots available right now.
+                            </span>
+                        )}
+                    </div>
+                    <div className="form-group">
+                        <label>Assignment Date</label>
+                        <input
+                            type="date"
+                            value={form.plot_assignment_date || ''}
+                            onChange={e => set('plot_assignment_date', e.target.value)}
+                            disabled={!form.assign_plot_id}
+                        />
+                    </div>
+                </div>
+                {alreadyOwned && (
+                    <div style={{ fontSize: 11.5, color: 'var(--t-faint)', marginTop: 4 }}>
+                        This member already owns the selected plot.
+                    </div>
+                )}
+            </div>
+
             {/* Toggle */}
             <div style={{ padding: '10px 0' }}>
                 <Toggle
@@ -360,7 +422,6 @@ function MemberInfo({ member, plots }: { member: any, plots: any[] }) {
             {row('Member ID', member.member_id, true)}
             {row('CNIC', member.cnic, true)}
             {row('Phone', member.phone, true)}
-            {row('Address', member.address)}
             {row('Joined', member.membership_date)}
             {row('Status', member.is_member ? 'Active Member' : 'Inactive')}
             {member.notes && row('Notes', member.notes)}
@@ -406,30 +467,65 @@ function MemberPanel({ member, onClose, onSaved, onDeleted }: {
 }) {
     const [tab, setTab] = useState<PanelTab>('overview')
     const [mode, setMode] = useState<PanelMode>('view')   // ← defaults to VIEW
-    const [form, setForm] = useState({ ...member })
+    const [form, setForm] = useState({
+        ...member,
+        assign_plot_id: '',
+        plot_assignment_date: member.membership_date || new Date().toISOString().split('T')[0]
+    })
     const [saving, setSaving] = useState(false)
     const [plots, setPlots] = useState<any[]>([])
+    const [allPlots, setAllPlots] = useState<any[]>([])
     const [confirm, setConfirm] = useState(false)
+    const [err, setErr] = useState('')
 
     useEffect(() => {
-        setForm({ ...member })
+        setForm({
+            ...member,
+            assign_plot_id: '',
+            plot_assignment_date: member.membership_date || new Date().toISOString().split('T')[0]
+        })
         setTab('overview')
         setMode('view')            // always open in view mode
         setConfirm(false)
+        setErr('')
         if (ipc) {
-            ipc.invoke('db:get-member-plots', member.id)
-                .then((p: any[]) => setPlots(p || []))
-                .catch(() => setPlots([]))
+            Promise.all([
+                ipc.invoke('db:get-member-plots', member.id),
+                ipc.invoke('db:get-plots')
+            ])
+                .then(([memberPlots, fetchedPlots]: [any[], any[]]) => {
+                    setPlots(memberPlots || [])
+                    setAllPlots(fetchedPlots || [])
+                })
+                .catch(() => {
+                    setPlots([])
+                    setAllPlots([])
+                })
         }
     }, [member.id])
 
     const handleSave = async () => {
         if (!form.name.trim() || !String(form.member_id || '').trim() || !String(form.cnic || '').trim() || !String(form.phone || '').trim() || !String(form.membership_date || '').trim()) return
+        if (!/^\d{13}$/.test(String(form.cnic || ''))) { setErr('CNIC must be exactly 13 digits'); return }
+        if (!/^\d{11}$/.test(String(form.phone || ''))) { setErr('Phone number must be exactly 11 digits'); return }
         setSaving(true)
+        setErr('')
         try {
             await ipc.invoke('db:update-member', { ...form, id: member.id, share_count: 4 })
+            const selectedPlotId = Number(form.assign_plot_id || 0)
+            const alreadyOwned = plots.some(p => p.id === selectedPlotId)
+            if (selectedPlotId > 0 && !alreadyOwned) {
+                await ipc.invoke('db:assign-owner', {
+                    plotId: selectedPlotId,
+                    memberId: member.id,
+                    startDate: form.plot_assignment_date || form.membership_date
+                })
+            }
             onSaved()
-        } finally { setSaving(false) }
+        } catch (e: any) {
+            setErr(e?.message || 'Failed to save member')
+            setSaving(false)
+        }
     }
 
     const handleDelete = async () => {
@@ -438,10 +534,18 @@ function MemberPanel({ member, onClose, onSaved, onDeleted }: {
     }
 
     const cancelEdit = () => {
-        setForm({ ...member })   // discard changes
+        setForm({
+            ...member,
+            assign_plot_id: '',
+            plot_assignment_date: member.membership_date || new Date().toISOString().split('T')[0]
+        })   // discard changes
         setMode('view')
         setConfirm(false)
+        setErr('')
     }
+
+    const ownedPlotIds = plots.map(p => p.id)
+    const assignablePlots = allPlots.filter((p: any) => !p.owner_name || ownedPlotIds.includes(p.id))
 
     return (
         <div className="panel-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
@@ -501,10 +605,21 @@ function MemberPanel({ member, onClose, onSaved, onDeleted }: {
                         <MemberInfo member={member} plots={plots} />
                     )}
                     {tab === 'overview' && mode === 'edit' && (
-                        <MemberForm form={form} onChange={setForm} />
+                        <MemberForm
+                            form={form}
+                            onChange={setForm}
+                            assignablePlots={assignablePlots}
+                            ownedPlotIds={ownedPlotIds}
+                        />
                     )}
                     {tab === 'statement' && (
                         <MemberStatement memberId={member.id} />
+                    )}
+                    {tab === 'overview' && mode === 'edit' && err && (
+                        <div className="msg msg-error" style={{ marginTop: 14 }}>
+                            <span>{err}</span>
+                            <button className="msg-close" onClick={() => setErr('')}>✕</button>
+                        </div>
                     )}
                 </div>
 
@@ -557,7 +672,14 @@ function MemberPanel({ member, onClose, onSaved, onDeleted }: {
                                     Cancel
                                 </button>
                                 <button className="btn btn-primary" onClick={handleSave}
-                                    disabled={saving || !form.name.trim() || !String(form.member_id || '').trim() || !String(form.cnic || '').trim() || !String(form.phone || '').trim() || !String(form.membership_date || '').trim()}>
+                                    disabled={
+                                        saving ||
+                                        !form.name.trim() ||
+                                        !String(form.member_id || '').trim() ||
+                                        !/^\d{13}$/.test(String(form.cnic || '')) ||
+                                        !/^\d{11}$/.test(String(form.phone || '')) ||
+                                        !String(form.membership_date || '').trim()
+                                    }>
                                     <Check size={14} />
                                     {saving ? 'Saving...' : 'Save Changes'}
                                 </button>
@@ -573,11 +695,20 @@ function MemberPanel({ member, onClose, onSaved, onDeleted }: {
 // ── Add member panel ──────────────────────────────────────────
 function AddMemberPanel({ onClose, onSaved }: { onClose: () => void, onSaved: () => void }) {
     const [form, setForm] = useState({
-        member_id: '', name: '', cnic: '', phone: '', address: '',
-        is_member: 1, membership_date: '', notes: ''
+        member_id: '', name: '', cnic: '', phone: '',
+        is_member: 1, membership_date: '', notes: '',
+        assign_plot_id: '', plot_assignment_date: new Date().toISOString().split('T')[0]
     })
     const [saving, setSaving] = useState(false)
     const [err, setErr] = useState('')
+    const [allPlots, setAllPlots] = useState<any[]>([])
+
+    useEffect(() => {
+        if (!ipc) return
+        ipc.invoke('db:get-plots')
+            .then((p: any[]) => setAllPlots(p || []))
+            .catch(() => setAllPlots([]))
+    }, [])
 
     const handleSave = async () => {
         if (!form.name.trim()) { setErr('Name is required'); return }
@@ -585,15 +716,29 @@ function AddMemberPanel({ onClose, onSaved }: { onClose: () => void, onSaved: ()
         if (!form.cnic.trim()) { setErr('CNIC is required'); return }
         if (!form.phone.trim()) { setErr('Phone number is required'); return }
         if (!form.membership_date.trim()) { setErr('Membership date is required'); return }
+        if (!/^\d{13}$/.test(form.cnic)) { setErr('CNIC must be exactly 13 digits'); return }
+        if (!/^\d{11}$/.test(form.phone)) { setErr('Phone number must be exactly 11 digits'); return }
         setSaving(true)
+        setErr('')
         try {
-            await ipc.invoke('db:add-member', { ...form, share_count: 4 })
+            const result = await ipc.invoke('db:add-member', { ...form, share_count: 4 })
+            const memberId = Number(result?.lastInsertRowid || 0)
+            const selectedPlotId = Number(form.assign_plot_id || 0)
+            if (selectedPlotId > 0 && memberId > 0) {
+                await ipc.invoke('db:assign-owner', {
+                    plotId: selectedPlotId,
+                    memberId,
+                    startDate: form.plot_assignment_date || form.membership_date
+                })
+            }
             onSaved()
         } catch (e: any) {
             setErr(e.message || 'Failed to save')
             setSaving(false)
         }
     }
+
+    const assignablePlots = allPlots.filter((p: any) => !p.owner_name)
 
     return (
         <div className="panel-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
@@ -603,7 +748,11 @@ function AddMemberPanel({ onClose, onSaved }: { onClose: () => void, onSaved: ()
                     <button className="panel-close" onClick={onClose}><X size={16} /></button>
                 </div>
                 <div className="panel-body">
-                    <MemberForm form={form} onChange={setForm} />
+                    <MemberForm
+                        form={form}
+                        onChange={setForm}
+                        assignablePlots={assignablePlots}
+                    />
                     {err && (
                         <div className="msg msg-error" style={{ marginTop: 14 }}>
                             <span>{err}</span>
@@ -614,7 +763,14 @@ function AddMemberPanel({ onClose, onSaved }: { onClose: () => void, onSaved: ()
                 <div className="panel-footer" style={{ justifyContent: 'flex-end' }}>
                     <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
                     <button className="btn btn-primary btn-lg" onClick={handleSave}
-                        disabled={saving || !form.name.trim() || !form.member_id.trim() || !form.cnic.trim() || !form.phone.trim() || !form.membership_date.trim()}>
+                        disabled={
+                            saving ||
+                            !form.name.trim() ||
+                            !form.member_id.trim() ||
+                            !/^\d{13}$/.test(form.cnic) ||
+                            !/^\d{11}$/.test(form.phone) ||
+                            !form.membership_date.trim()
+                        }>
                         <Check size={15} />
                         {saving ? 'Saving...' : 'Save Member'}
                     </button>

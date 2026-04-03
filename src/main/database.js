@@ -171,10 +171,14 @@ function runMigrations() {
         total_amount DECIMAL(10,2) NOT NULL,
         amount_paid DECIMAL(10,2) DEFAULT 0,
         balance_due DECIMAL(10,2) DEFAULT 0,
+        credit_applied DECIMAL(10,2) DEFAULT 0,
         status TEXT DEFAULT 'unpaid',
         extra_config TEXT,
         is_deleted BOOLEAN DEFAULT 0,
         notes TEXT,
+        void_reason TEXT,
+        voided_by INTEGER REFERENCES users(id),
+        voided_at DATETIME,
         created_by INTEGER REFERENCES users(id),
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -189,12 +193,23 @@ function runMigrations() {
         notes TEXT
       );
 
+      CREATE TABLE IF NOT EXISTS adjustments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        bill_id INTEGER NOT NULL REFERENCES bills(id),
+        house_id INTEGER NOT NULL REFERENCES plots(id),
+        amount DECIMAL(10,2) NOT NULL,
+        reason TEXT NOT NULL,
+        created_by INTEGER REFERENCES users(id),
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+
       CREATE TABLE IF NOT EXISTS payments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         bill_id INTEGER NOT NULL REFERENCES bills(id),
         payment_date DATE NOT NULL,
         amount DECIMAL(10,2) NOT NULL,
         payment_method TEXT DEFAULT 'cash',
+        bank_id INTEGER REFERENCES banks(id),
         receipt_number TEXT,
         voucher_number TEXT,
         received_by INTEGER REFERENCES users(id),
@@ -375,11 +390,11 @@ function runMigrations() {
       ['residential_vacant', 'Monthly Contribution', 5000, 0, null, 1],
       ['residential_vacant', 'Aquifer Contribution', 300, 0, null, 2],
       ['residential_vacant', 'Mosque Contribution', 500, 0, null, 3],
-      ['commercial', 'Base Contribution', 1500, 0, null, 1],
-      ['commercial', 'Mosque Contribution', 500, 0, null, 2],
-      ['commercial', 'Aquifer Contribution', 300, 0, null, 3],
-      ['commercial', 'Garbage Collection', 300, 1, 'upper_floors_residential', 4],
-      ['commercial', 'Per Extra Floor', 700, 1, 'commercial_floors', 5],
+      ['commercial', 'Contribution for Commercial property - Rs. 1500/- per month for vacant and single story', 1500, 0, null, 1],
+      ['commercial', 'Contribution for Mosque', 500, 0, null, 2],
+      ['commercial', 'Contribution for Aquifer if water connection is provided', 300, 1, 'has_water_connection', 3],
+      ['commercial', 'Contribution for garbage collection if upper stories are used for residential purpose', 300, 1, 'upper_floors_residential', 4],
+      ['commercial', 'Contribution for each constructed story other than ground floor', 700, 1, 'commercial_floors', 5],
     ];
     for (const t of templates) {
       insertTemplate.run(t[0], t[1], t[2], t[3], t[4], t[5]);
@@ -684,14 +699,20 @@ function runMigrations() {
       INSERT OR IGNORE INTO charge_account_map (charge_name, account_code) VALUES (?, ?)
     `);
     insertMap.run('Monthly Contribution',    '4000');
+    insertMap.run('Contribution for Commercial property - Rs. 1500/- per month for vacant and single story', '4000');
+    insertMap.run('Contribution for Commercial property', '4000');
     insertMap.run('Base Contribution',       '4000');
     insertMap.run('Monthly Tenant Challan',  '4004');
+    insertMap.run('Contribution for Mosque', '4001');
     insertMap.run('Mosque Contribution',     '4001');
     insertMap.run('Mosque Fund',             '4001');
+    insertMap.run('Contribution for garbage collection if upper stories are used for residential purpose', '4002');
     insertMap.run('Garbage Collection',      '4002');
     insertMap.run('Garbage Charges',         '4002');
+    insertMap.run('Contribution for Aquifer if water connection is provided', '4003');
     insertMap.run('Aquifer Contribution',    '4003');
     insertMap.run('Aquifer Charges',         '4003');
+    insertMap.run('Contribution for each constructed story other than ground floor', '4000');
     insertMap.run('Per Extra Floor',         '4000');
 
     // Also seed new fund accounts if not already present
@@ -712,6 +733,31 @@ function runMigrations() {
 
     db.prepare(`UPDATE settings SET value = '15' WHERE key = 'schema_version'`).run();
     currentVersion = 15;
+  }
+
+  // Migration 16: immutable bill adjustments + void metadata
+  if (currentVersion < 16) {
+    console.log('Running migration 16 (adjustments + bill void metadata)...');
+    const tryAdd = (sql) => { try { db.exec(sql); } catch(_) { /* column/table already exists */ } };
+    tryAdd(`ALTER TABLE bills ADD COLUMN void_reason TEXT`);
+    tryAdd(`ALTER TABLE bills ADD COLUMN voided_by INTEGER REFERENCES users(id)`);
+    tryAdd(`ALTER TABLE bills ADD COLUMN voided_at DATETIME`);
+    tryAdd(`ALTER TABLE bills ADD COLUMN credit_applied DECIMAL(10,2) DEFAULT 0`);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS adjustments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        bill_id INTEGER NOT NULL REFERENCES bills(id),
+        house_id INTEGER NOT NULL REFERENCES plots(id),
+        amount DECIMAL(10,2) NOT NULL,
+        reason TEXT NOT NULL,
+        created_by INTEGER REFERENCES users(id),
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE INDEX IF NOT EXISTS idx_adjustments_bill_id ON adjustments(bill_id);
+      CREATE INDEX IF NOT EXISTS idx_adjustments_house_id ON adjustments(house_id);
+    `);
+    db.prepare(`UPDATE settings SET value = '16' WHERE key = 'schema_version'`).run();
+    currentVersion = 16;
   }
 
   // Migration 16: bills.notice for per-month remarks printed on challans
@@ -753,6 +799,7 @@ function runMigrations() {
       ['Sewerage Connection Charges', 15000, 0, null, 0, 'Rs. 15,000 fixed'],
       ['Park Booking (Member)', 20000, 0, null, 0, 'Rs. 20,000 per day'],
       ['Park Booking (Non-Member)', 40000, 0, null, 0, 'Rs. 40,000 per day'],
+      ['Gate Toll Tax', 5000, 0, null, 0, 'Gate toll tax special challan'],
       ['NOC for Sub Division (Corner Plot)', 1000000, 0, null, 0, 'Rs. 1,000,000 fixed'],
       ['NOC for Sub Division (Pre-2019 Constructed)', 500000, 0, null, 0, 'Rs. 500,000 fixed'],
       ['Others', null, 0, null, 0, 'Custom amount entered manually'],
@@ -836,6 +883,7 @@ function runMigrations() {
       ['4017', 'Sewerage Connection Charges Income', 'revenue', 'credit'],
       ['4018', 'Park Booking Income (Member)', 'revenue', 'credit'],
       ['4019', 'Park Booking Income (Non-Member)', 'revenue', 'credit'],
+      ['4022', 'Gate Toll Tax Income', 'revenue', 'credit'],
       ['4020', 'NOC Sub Division Income', 'revenue', 'credit'],
       ['4021', 'Other Special Charges Income', 'revenue', 'credit'],
     ];
@@ -930,6 +978,7 @@ function runMigrations() {
       ['Printing & Stationery Contribution', '5026'],
       ['Audit fee', '5027'],
       ['Professional fee', '5028'],
+      ['Gate Tool Tax', '5041'],
       ['Punjab Employees Social Security', '5029'],
       ['Travelling & Conveyance Contribution', '5030'],
       ['Tree Plantation', '5031'],
@@ -960,6 +1009,7 @@ function runMigrations() {
       ['Sewerage Connection Charges', '4017'],
       ['Park Booking (Member)', '4018'],
       ['Park Booking (Non-Member)', '4019'],
+      ['Gate Toll Tax', '4022'],
       ['NOC for Sub Division (Corner Plot)', '4020'],
       ['NOC for Sub Division (Pre-2019 Constructed)', '4020'],
       ['Others', '4021'],
@@ -976,6 +1026,24 @@ function runMigrations() {
 
     db.prepare(`UPDATE settings SET value = '20' WHERE key = 'schema_version'`).run();
     currentVersion = 20;
+  }
+
+  // Migration 21: Store payment bank reference for bank collections
+  if (currentVersion < 21) {
+    console.log('Running migration 21 (payment bank reference)...');
+
+    const hasBankId = db.prepare(`
+      SELECT 1
+      FROM pragma_table_info('payments')
+      WHERE name = 'bank_id'
+    `).get();
+
+    if (!hasBankId) {
+      db.exec(`ALTER TABLE payments ADD COLUMN bank_id INTEGER REFERENCES banks(id)`);
+    }
+
+    db.prepare(`UPDATE settings SET value = '21' WHERE key = 'schema_version'`).run();
+    currentVersion = 21;
   }
 
   // Migration 21: members.member_id + required member identity fields backfill
@@ -1042,9 +1110,9 @@ function runMigrations() {
     currentVersion = 21;
   }
 
-  // Migration 22: mosque contribution toggle per plot + unconditional aquifer billing
+  // Migration 22: mosque contribution toggle per plot
   if (currentVersion < 22) {
-    console.log('Running migration 22 (mosque toggle + unconditional aquifer)...');
+    console.log('Running migration 22 (mosque toggle)...');
 
     const tryExec = (sql) => {
       try { db.exec(sql); } catch (_) { /* already exists / not applicable */ }
@@ -1059,15 +1127,52 @@ function runMigrations() {
       WHERE has_mosque_contribution IS NULL
     `);
 
-    // Water connection should no longer gate aquifer contribution.
+    db.prepare(`UPDATE settings SET value = '22' WHERE key = 'schema_version'`).run();
+    currentVersion = 22;
+  }
+
+  // Migration 27: Restore commercial aquifer condition to water connection only
+  if (currentVersion < 27) {
+    console.log('Running migration 27 (commercial aquifer condition)...');
+
     db.prepare(`
       UPDATE bill_templates
-      SET is_conditional = 0, condition_field = NULL
+      SET is_conditional = 1, condition_field = 'has_water_connection'
       WHERE plot_type = 'commercial' AND charge_name = 'Aquifer Contribution'
     `).run();
 
-    db.prepare(`UPDATE settings SET value = '22' WHERE key = 'schema_version'`).run();
-    currentVersion = 22;
+    db.prepare(`UPDATE settings SET value = '27' WHERE key = 'schema_version'`).run();
+    currentVersion = 27;
+  }
+
+  // Migration 28: Rename commercial charge labels to requested wording
+  if (currentVersion < 28) {
+    console.log('Running migration 28 (commercial charge wording)...');
+
+    const renamePairs = [
+      ['Base Contribution', 'Contribution for Commercial property - Rs. 1500/- per month for vacant and single story'],
+      ['Mosque Contribution', 'Contribution for Mosque'],
+      ['Aquifer Contribution', 'Contribution for Aquifer if water connection is provided'],
+      ['Garbage Collection', 'Contribution for garbage collection if upper stories are used for residential purpose'],
+      ['Per Extra Floor', 'Contribution for each constructed story other than ground floor'],
+    ];
+
+    for (const [oldName, newName] of renamePairs) {
+      db.prepare(`
+        UPDATE bill_templates
+        SET charge_name = ?
+        WHERE plot_type = 'commercial' AND charge_name = ?
+      `).run(newName, oldName);
+
+      db.prepare(`
+        INSERT INTO charge_account_map (charge_name, account_code)
+        VALUES (?, (SELECT account_code FROM charge_account_map WHERE charge_name = ? LIMIT 1))
+        ON CONFLICT(charge_name) DO UPDATE SET account_code = excluded.account_code
+      `).run(newName, oldName);
+    }
+
+    db.prepare(`UPDATE settings SET value = '28' WHERE key = 'schema_version'`).run();
+    currentVersion = 28;
   }
 
   // Migration 23: tenants.tenant_id + required tenant identity fields backfill
@@ -1129,5 +1234,146 @@ function runMigrations() {
 
     db.prepare(`UPDATE settings SET value = '23' WHERE key = 'schema_version'`).run();
     currentVersion = 23;
+  }
+
+  // Migration 24: account remap/cleanup requested for ledger headings
+  if (currentVersion < 24) {
+    console.log('Running migration 24 (receivable/remap heading cleanup)...');
+
+    db.transaction(() => {
+      // Connect "Stationery & Office Supplies" heading to special-bill revenue flow.
+      db.prepare(`
+        UPDATE accounts
+        SET account_name = 'Special Bill Revenue - Stationery & Office Supplies',
+            account_type = 'revenue',
+            normal_balance = 'credit'
+        WHERE account_code = '5040'
+      `).run();
+
+      db.prepare(`
+        INSERT INTO charge_account_map (charge_name, account_code)
+        VALUES ('Others', '5040')
+        ON CONFLICT(charge_name) DO UPDATE SET account_code = excluded.account_code
+      `).run();
+
+      // Soft-delete requested disconnected headings from active chart.
+      db.prepare(`UPDATE accounts SET is_active = 0 WHERE account_code IN ('5000', '3000', '4010')`).run();
+
+      db.prepare(`UPDATE settings SET value = '24' WHERE key = 'schema_version'`).run();
+    })();
+
+    currentVersion = 24;
+  }
+
+  // Migration 25: add dedicated Gate Tool Tax expense account
+  if (currentVersion < 25) {
+    console.log('Running migration 25 (Gate Tool Tax expense account)...');
+
+    db.transaction(() => {
+      db.prepare(`
+        INSERT OR IGNORE INTO accounts (account_code, account_name, account_type, normal_balance)
+        VALUES ('5041', 'Gate Tool Tax', 'expense', 'debit')
+      `).run();
+
+      db.prepare(`
+        INSERT INTO expense_category_map (category_name, account_code)
+        VALUES ('Gate Tool Tax', '5041')
+        ON CONFLICT(category_name) DO UPDATE SET account_code = excluded.account_code
+      `).run();
+
+      db.prepare(`UPDATE settings SET value = '25' WHERE key = 'schema_version'`).run();
+    })();
+
+    currentVersion = 25;
+  }
+
+  // Migration 26: add Gate Toll Tax to Special Challan master + ledger mapping
+  if (currentVersion < 26) {
+    console.log('Running migration 26 (Gate Toll Tax special challan mapping)...');
+
+    db.transaction(() => {
+      const upsertCharge = db.prepare(`
+        INSERT INTO onetime_charges (charge_name, base_amount, is_percentage, percentage_value, varies_by_marla, is_active, notes)
+        VALUES ('Gate Toll Tax', 5000, 0, NULL, 0, 1, 'Gate toll tax special challan')
+        ON CONFLICT(charge_name) DO UPDATE SET
+          base_amount = excluded.base_amount,
+          is_percentage = excluded.is_percentage,
+          percentage_value = excluded.percentage_value,
+          varies_by_marla = excluded.varies_by_marla,
+          is_active = 1,
+          notes = excluded.notes
+      `);
+      upsertCharge.run();
+
+      db.prepare(`
+        INSERT OR IGNORE INTO accounts (account_code, account_name, account_type, normal_balance)
+        VALUES ('4022', 'Gate Toll Tax Income', 'revenue', 'credit')
+      `).run();
+
+      db.prepare(`
+        INSERT INTO charge_account_map (charge_name, account_code)
+        VALUES ('Gate Toll Tax', '4022')
+        ON CONFLICT(charge_name) DO UPDATE SET account_code = excluded.account_code
+      `).run();
+
+      db.prepare(`UPDATE settings SET value = '26' WHERE key = 'schema_version'`).run();
+    })();
+
+    currentVersion = 26;
+  }
+
+  // Migration 29: Repair commercial aquifer condition for all legacy name variants
+  if (currentVersion < 29) {
+    console.log('Running migration 29 (repair commercial aquifer template condition)...');
+
+    db.prepare(`
+      UPDATE bill_templates
+      SET
+        is_conditional = 1,
+        condition_field = 'has_water_connection',
+        amount = CASE WHEN amount IS NULL OR amount <= 0 THEN 300 ELSE amount END,
+        is_active = 1
+      WHERE plot_type = 'commercial'
+        AND lower(trim(charge_name)) IN (
+          'aquifer contribution',
+          'aquifer charges',
+          'contribution for aquifer if water connection is provided'
+        )
+    `).run();
+
+    db.prepare(`
+      INSERT INTO bill_templates (plot_type, charge_name, amount, is_conditional, condition_field, sort_order, is_active)
+      SELECT 'commercial', 'Contribution for Aquifer if water connection is provided', 300, 1, 'has_water_connection', 3, 1
+      WHERE NOT EXISTS (
+        SELECT 1 FROM bill_templates
+        WHERE plot_type = 'commercial'
+          AND lower(trim(charge_name)) IN (
+            'aquifer contribution',
+            'aquifer charges',
+            'contribution for aquifer if water connection is provided'
+          )
+      )
+    `).run();
+
+    db.prepare(`
+      INSERT INTO charge_account_map (charge_name, account_code)
+      VALUES ('Contribution for Aquifer if water connection is provided', '4003')
+      ON CONFLICT(charge_name) DO UPDATE SET account_code = excluded.account_code
+    `).run();
+
+    db.prepare(`
+      INSERT INTO charge_account_map (charge_name, account_code)
+      VALUES ('Aquifer Contribution', '4003')
+      ON CONFLICT(charge_name) DO UPDATE SET account_code = excluded.account_code
+    `).run();
+
+    db.prepare(`
+      INSERT INTO charge_account_map (charge_name, account_code)
+      VALUES ('Aquifer Charges', '4003')
+      ON CONFLICT(charge_name) DO UPDATE SET account_code = excluded.account_code
+    `).run();
+
+    db.prepare(`UPDATE settings SET value = '29' WHERE key = 'schema_version'`).run();
+    currentVersion = 29;
   }
 }

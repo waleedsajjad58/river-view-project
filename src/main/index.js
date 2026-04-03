@@ -102,6 +102,21 @@ function createWindow() {
     }
 }
 
+ipcMain.handle('app:set-zoom-factor', (_e, { factor }) => {
+    const safeFactor = Math.min(1.5, Math.max(0.8, Number(factor) || 1));
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.setZoomFactor(safeFactor);
+    }
+    return { factor: safeFactor };
+});
+
+ipcMain.handle('app:get-zoom-factor', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        return { factor: mainWindow.webContents.getZoomFactor() };
+    }
+    return { factor: 1 };
+});
+
 // ── IPC Handlers ──────────────────────────────────────────────
 
 // ── Audit Log helper — defined first so all handlers can call it ──
@@ -115,160 +130,177 @@ function writeAuditLog(db, tableName, recordId, action, details = {}) {
     }
 }
 
-function recalcPlotBills(db, plotId) {
-        const allUnpaid = db.prepare(`
-            SELECT * FROM bills
-                        WHERE plot_id = ? 
-                            AND status IN ('unpaid','partial') 
-                            AND is_deleted = 0
-                            AND bill_type IN ('monthly', 'tenant')
-                            AND billing_month IS NOT NULL
-            ORDER BY billing_month ASC
-        `).all(plotId);
-
-
-
-        for (const fb of allUnpaid) {
-                // Fresh per-charge arrears from all previous unpaid bills
-                const freshHistorical = db.prepare(`
-                    SELECT bi.charge_name,
-                        COALESCE(SUM(
-                            CASE WHEN b.subtotal > 0
-                                THEN bi.amount * (b.balance_due / b.subtotal)
-                                ELSE 0 END
-                        ), 0) as owed
-                    FROM bill_items bi
-                    JOIN bills b ON bi.bill_id = b.id
-                    WHERE b.plot_id = ?
-                        AND b.billing_month < ?
-                        AND b.balance_due > 0.01
-                        AND b.is_deleted = 0
-                        AND bi.charge_name NOT LIKE '%Arrears%'
-                        AND bi.charge_name NOT LIKE '%Late Fee%'
-                    GROUP BY bi.charge_name
-                `).all(plotId, fb.billing_month);
-
-                const freshMap = {};
-                let totalArrears = 0;
-                for (const row of freshHistorical) {
-                        freshMap[row.charge_name] = row.owed || 0;
-                        totalArrears += row.owed || 0;
-                }
-
-                // Update each existing charge item
-                const baseItems = db.prepare(`
-                    SELECT id, charge_name FROM bill_items
-                    WHERE bill_id = ?
-                        AND charge_name NOT LIKE '%Arrears%'
-                        AND charge_name NOT LIKE '%Late Fee%'
-                `).all(fb.id);
-
-
-                    // Get current items_sum to derive each charge's base rate proportionally
-                    // This uses the bill's own subtotal — no template lookup needed
-                    // subtotal = current month charges only (stored at generation time, never changes)
-                    const currentItemsTotal = baseItems.reduce((s, i) => {
-                        const row = db.prepare('SELECT amount FROM bill_items WHERE id = ?').get(i.id);
-                        return s + (row?.amount || 0);
-                    }, 0);
-
-                    for (const item of baseItems) {
-                        const currentAmount = db.prepare(
-                            'SELECT amount FROM bill_items WHERE id = ?'
-                        ).get(item.id)?.amount || 0;
-
-                        // Base rate = this charge's proportion of the total × subtotal
-                        const baseRate = currentItemsTotal > 0
-                            ? (currentAmount / currentItemsTotal) * (fb.subtotal || 0)
-                            : 0;
-
-                        const historical = freshMap[item.charge_name] || 0;
-                        db.prepare('UPDATE bill_items SET amount = ? WHERE id = ?')
-                                .run(Math.round((baseRate + historical) * 100) / 100, item.id);
-                        delete freshMap[item.charge_name];
-                    }
-                // Any historical charges not in current bill
-                for (const [charge_name, owed] of Object.entries(freshMap)) {
-                        if (owed > 0.01) {
-                                db.prepare(`
-                                    INSERT OR IGNORE INTO bill_items (bill_id, charge_name, amount)
-                                    VALUES (?, ?, ?)
-                                `).run(fb.id, charge_name, owed);
-                        }
-                }
-
-                // Remove stale arrears rows
-                db.prepare(`
-                    DELETE FROM bill_items
-                    WHERE bill_id = ? AND charge_name LIKE '%Arrears%'
-                `).run(fb.id);
-
-                // Update bill totals
-                const newTotal   = (fb.subtotal || 0) + totalArrears;
-                const newBalance = Math.max(0, newTotal - (fb.amount_paid || 0));
-                const newStatus  = newBalance <= 0.01 ? 'paid'
-                        : newBalance === newTotal ? 'unpaid' : 'partial';
-
-                db.prepare(`
-                    UPDATE bills SET
-                        total_amount = ?,
-                        arrears      = ?,
-                        balance_due  = ?,
-                        status       = ?,
-                        updated_at   = CURRENT_TIMESTAMP
-                    WHERE id = ?
-                `).run(newTotal, totalArrears, newBalance, newStatus, fb.id);
-        }
-}
-
-// ── Plots ─────────────────────────────────────────────────────
-ipcMain.handle('db:get-plots', () => {
-    const db = getDb();
-    return db.prepare(`
-        SELECT p.*, m.name as owner_name
-        FROM plots p
-        LEFT JOIN plot_ownership po ON p.id = po.plot_id AND po.end_date IS NULL
-        LEFT JOIN members m ON po.member_id = m.id
-        WHERE p.is_deleted = 0 ORDER BY p.plot_number
-    `).all();
-});
-
-ipcMain.handle('db:get-plot', (_e, id) => getDb().prepare('SELECT * FROM plots WHERE id = ? AND is_deleted = 0').get(id));
-
-const normalizePlotPayload = (plot = {}) => {
-    const floorsRaw = Number.parseInt(plot.commercial_floors, 10);
-    const floors = Number.isFinite(floorsRaw) ? Math.max(0, floorsRaw) : 0;
-    const maxFloors = plot.plot_type === 'residential_constructed' ? 4 : 20;
+function normalizePlotPayload(plot = {}) {
     return {
-        ...plot,
+        id: plot.id ? Number(plot.id) : null,
         plot_number: String(plot.plot_number || '').trim(),
-        block: plot.block || null,
-        notes: plot.notes || null,
-        commercial_floors: Math.min(floors, maxFloors),
+        block: String(plot.block || '').trim() || null,
+        marla_size: String(plot.marla_size || '').trim() || '5 Marla',
+        plot_type: String(plot.plot_type || 'residential_vacant').trim(),
+        commercial_floors: Number.parseInt(plot.commercial_floors, 10) || 0,
         has_water_connection: plot.has_water_connection ? 1 : 0,
         has_sewerage_connection: plot.has_sewerage_connection ? 1 : 0,
-        has_mosque_contribution: plot.has_mosque_contribution === 0 ? 0 : 1,
+        has_mosque_contribution: plot.has_mosque_contribution === 0 || plot.has_mosque_contribution === '0' ? 0 : 1,
         upper_floors_residential: plot.upper_floors_residential ? 1 : 0,
+        notes: plot.notes || null,
     };
-};
+}
 
-ipcMain.handle('db:add-plot', (_e, plot) => {
-    const normalized = normalizePlotPayload(plot);
-    return getDb().prepare(`
-        INSERT INTO plots (plot_number, block, marla_size, plot_type, commercial_floors, has_water_connection, has_sewerage_connection, has_mosque_contribution, upper_floors_residential, notes)
-        VALUES (@plot_number, @block, @marla_size, @plot_type, @commercial_floors, @has_water_connection, @has_sewerage_connection, @has_mosque_contribution, @upper_floors_residential, @notes)
-    `).run(normalized);
-});
+function recalcPlotBills() {
+    return { skipped: true };
+}
+
+function sumStoredArrears(db, { plotId = null, tenantId = null, billingMonth = null, billType = null }) {
+    const where = ['b.balance_due > 0.01', 'b.is_deleted = 0'];
+    const params = [];
+
+    if (plotId !== null) {
+        where.push('b.plot_id = ?');
+        params.push(plotId);
+    }
+
+    if (tenantId !== null) {
+        where.push('b.tenant_id = ?');
+        params.push(tenantId);
+    }
+
+    if (billingMonth) {
+        where.push('b.billing_month < ?');
+        params.push(billingMonth);
+    }
+
+    if (billType) {
+        where.push('b.bill_type = ?');
+        params.push(billType);
+    }
+
+    const row = db.prepare(`
+        SELECT COALESCE(SUM(b.balance_due), 0) as total
+        FROM bills b
+        WHERE ${where.join(' AND ')}
+    `).get(...params);
+
+    return row?.total || 0;
+}
+
+function sumBillAdjustments(db, billId) {
+    return db.prepare(`
+        SELECT COALESCE(SUM(amount), 0) as total
+        FROM adjustments
+        WHERE bill_id = ?
+    `).get(billId)?.total || 0;
+}
+
+function syncBillTotals(db, billId) {
+    const bill = db.prepare('SELECT * FROM bills WHERE id = ?').get(billId);
+    if (!bill) throw new Error('Bill not found');
+    if (bill.status === 'voided') return bill;
+
+    const adjustmentTotal = sumBillAdjustments(db, billId);
+    const totalAmount = Number(bill.subtotal || 0)
+        + Number(bill.late_fee || 0)
+        + Number(bill.arrears || 0)
+        + Number(adjustmentTotal || 0);
+    const paidAmount = Number(bill.amount_paid || 0);
+    const balanceDue = Math.max(0, totalAmount - paidAmount);
+    const status = totalAmount <= 0.01 ? 'paid' : balanceDue <= 0.01 ? 'paid' : paidAmount <= 0.01 ? 'unpaid' : 'partial';
+    const desiredCredit = Math.max(0, paidAmount - totalAmount);
+    const creditDelta = desiredCredit - Number(bill.credit_applied || 0);
+
+    db.prepare(`
+        UPDATE bills SET
+            total_amount = ?,
+            balance_due = ?,
+            credit_applied = ?,
+            status = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+    `).run(totalAmount, balanceDue, desiredCredit, status, billId);
+
+    if (Math.abs(creditDelta) > 0.01) {
+        db.prepare(`
+            INSERT INTO plot_credits (plot_id, balance, updated_at)
+            VALUES (?, ?, datetime('now'))
+            ON CONFLICT(plot_id) DO UPDATE SET
+              balance = MAX(0, balance + excluded.balance),
+              updated_at = datetime('now')
+        `).run(bill.plot_id, creditDelta);
+    }
+
+    return { ...bill, total_amount: totalAmount, balance_due: balanceDue, status, adjustment_total: adjustmentTotal };
+}
 
 ipcMain.handle('db:update-plot', (_e, plot) => {
     const normalized = normalizePlotPayload(plot);
     return getDb().prepare(`
-        UPDATE plots SET plot_number=@plot_number, block=@block, marla_size=@marla_size, plot_type=@plot_type,
+        UPDATE plots SET plot_number=@plot_number, marla_size=@marla_size, plot_type=@plot_type,
         commercial_floors=@commercial_floors, has_water_connection=@has_water_connection,
         has_sewerage_connection=@has_sewerage_connection, has_mosque_contribution=@has_mosque_contribution,
         upper_floors_residential=@upper_floors_residential,
         notes=@notes, updated_at=CURRENT_TIMESTAMP WHERE id=@id
     `).run(normalized);
+});
+
+ipcMain.handle('db:get-plots', () => {
+    const db = getDb();
+    return db.prepare(`
+        SELECT p.*, m.name as owner_name, m.phone as owner_phone
+        FROM plots p
+        LEFT JOIN plot_ownership po ON p.id = po.plot_id AND po.end_date IS NULL
+        LEFT JOIN members m ON po.member_id = m.id
+        WHERE p.is_deleted = 0
+        ORDER BY p.plot_number
+    `).all();
+});
+
+ipcMain.handle('db:get-plot', (_e, id) => {
+    const db = getDb();
+    return db.prepare('SELECT * FROM plots WHERE id = ? AND is_deleted = 0').get(id);
+});
+
+ipcMain.handle('db:add-plot', (_e, plot) => {
+    const db = getDb();
+    const normalized = normalizePlotPayload(plot);
+    if (!normalized.plot_number) throw new Error('Plot number is required');
+
+    return db.transaction(() => {
+        const result = db.prepare(`
+            INSERT INTO plots (
+                plot_number, block, marla_size, plot_type, commercial_floors,
+                has_water_connection, has_sewerage_connection, has_mosque_contribution,
+                upper_floors_residential, notes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+            normalized.plot_number,
+            normalized.block,
+            normalized.marla_size,
+            normalized.plot_type,
+            normalized.commercial_floors,
+            normalized.has_water_connection,
+            normalized.has_sewerage_connection,
+            normalized.has_mosque_contribution,
+            normalized.upper_floors_residential,
+            normalized.notes,
+        );
+
+        const plotId = result.lastInsertRowid;
+        if (plot.addOwnerId || plot.assignOwnerId) {
+            const memberId = Number(plot.addOwnerId || plot.assignOwnerId);
+            if (memberId) {
+                db.prepare(`
+                    INSERT INTO plot_ownership (plot_id, member_id, start_date)
+                    VALUES (?, ?, ?)
+                `).run(plotId, memberId, plot.ownerStartDate || new Date().toISOString().split('T')[0]);
+            }
+        }
+
+        writeAuditLog(db, 'plots', plotId, 'CREATE', {
+            plot_number: normalized.plot_number,
+            plot_type: normalized.plot_type,
+        });
+
+        return { lastInsertRowid: plotId };
+    })();
 });
 
 ipcMain.handle('db:delete-plot', (_e, id) =>
@@ -303,6 +335,8 @@ const validateRequiredMemberFields = (member) => {
     if (!member.cnic) throw new Error('CNIC is required');
     if (!member.phone) throw new Error('Phone number is required');
     if (!member.membership_date) throw new Error('Membership date is required');
+    if (!/^\d{13}$/.test(member.cnic)) throw new Error('CNIC must be exactly 13 digits');
+    if (!/^\d{11}$/.test(member.phone)) throw new Error('Phone number must be exactly 11 digits');
 };
 
 ipcMain.handle('db:get-members', () => getDb().prepare('SELECT * FROM members WHERE is_deleted = 0 ORDER BY member_id, name').all());
@@ -357,8 +391,8 @@ ipcMain.handle('db:get-member-statement', (_e, memberId) => {
 
     const totalBilled = bills.reduce((s, b) => s + (b.total_amount || 0), 0);
     const totalPaid = bills.reduce((s, b) => s + (b.amount_paid || 0), 0);
-    const totalOutstanding = bills.reduce((s, b) => s + (b.balance_due || 0), 0);
-    const unpaidCount = bills.filter(b => b.status !== 'paid').length;
+    const totalOutstanding = bills.reduce((s, b) => s + (['unpaid', 'partial', 'overdue'].includes(b.status) ? (b.balance_due || 0) : 0), 0);
+    const unpaidCount = bills.filter(b => ['unpaid', 'partial', 'overdue'].includes(b.status)).length;
 
     return { member, plots, bills, summary: { totalBilled, totalPaid, totalOutstanding, unpaidCount } };
 });
@@ -374,21 +408,42 @@ ipcMain.handle('db:get-plot-statement', (_e, plotId) => {
         WHERE p.id = ?
     `).get(plotId);
 
-    const bills = db.prepare(`
-        SELECT b.*,
-               b.subtotal as current_charges,
-               b.arrears as previous_dues,
-               b.balance_due as actual_balance,
-               (SELECT GROUP_CONCAT(bi.charge_name, ', ') FROM bill_items bi WHERE bi.bill_id = b.id) as charge_names
-        FROM bills b
-        WHERE b.plot_id = ? AND b.is_deleted = 0
-        ORDER BY b.bill_date DESC
-    `).all(plotId);
+    let bills = [];
+    try {
+        const hasAdjustments = !!db.prepare(
+            "SELECT 1 as ok FROM sqlite_master WHERE type = 'table' AND name = 'adjustments'"
+        ).get();
+
+        bills = db.prepare(`
+            SELECT b.*,
+                   b.subtotal as current_charges,
+                   b.arrears as previous_dues,
+                   b.balance_due as actual_balance,
+                   ${hasAdjustments ? "COALESCE((SELECT SUM(a.amount) FROM adjustments a WHERE a.bill_id = b.id), 0)" : '0'} as adjustment_total,
+                   (SELECT GROUP_CONCAT(bi.charge_name, ', ') FROM bill_items bi WHERE bi.bill_id = b.id) as charge_names
+            FROM bills b
+            WHERE b.plot_id = ? AND b.is_deleted = 0
+            ORDER BY b.bill_date DESC
+        `).all(plotId);
+    } catch (err) {
+        if (!String(err?.message || '').toLowerCase().includes('no such table: adjustments')) throw err;
+        bills = db.prepare(`
+            SELECT b.*,
+                   b.subtotal as current_charges,
+                   b.arrears as previous_dues,
+                   b.balance_due as actual_balance,
+                   0 as adjustment_total,
+                   (SELECT GROUP_CONCAT(bi.charge_name, ', ') FROM bill_items bi WHERE bi.bill_id = b.id) as charge_names
+            FROM bills b
+            WHERE b.plot_id = ? AND b.is_deleted = 0
+            ORDER BY b.bill_date DESC
+        `).all(plotId);
+    }
 
     const totalBilled = bills.reduce((s, b) => s + (b.total_amount || 0), 0);
     const totalPaid = bills.reduce((s, b) => s + (b.amount_paid || 0), 0);
-    const totalOutstanding = bills.reduce((s, b) => s + (b.balance_due || 0), 0);
-    const unpaidCount = bills.filter(b => b.status !== 'paid').length;
+    const totalOutstanding = bills.reduce((s, b) => s + (['unpaid', 'partial', 'overdue'].includes(b.status) ? (b.balance_due || 0) : 0), 0);
+    const unpaidCount = bills.filter(b => ['unpaid', 'partial', 'overdue'].includes(b.status)).length;
     const monthlyCount = bills.filter(b => b.bill_type === 'monthly').length;
     const specialCount = bills.filter(b => b.bill_type === 'special').length;
     const generalCount = bills.filter(b => b.bill_type === 'general').length;
@@ -514,9 +569,11 @@ ipcMain.handle('db:get-expenditures', (_e, { startDate, endDate, category } = {}
     return db.prepare(query).all(...params);
 });
 
-ipcMain.handle('db:add-expenditure', (_e, { expenditureDate, category, description, amount, paymentMethod, receiptNumber, vendorName, accountId }) => {
+ipcMain.handle('db:add-expenditure', (_e, { expenditureDate, category, description, amount, paymentMethod, receiptNumber, vendorName, accountId, bankId }) => {
     const db = getDb();
     return db.transaction(() => {
+        const normalizedPaymentMethod = paymentMethod === 'cash' ? 'cash' : 'bank';
+
         // ── Auto-generate voucher number: EXP-YYYYMMDD-NNN ──
         const dateCompact = (expenditureDate || new Date().toISOString().split('T')[0]).replace(/-/g, '');
         const seqRow = db.prepare("SELECT COUNT(*) as c FROM expenditures WHERE expenditure_date = ? AND is_deleted = 0").get(expenditureDate);
@@ -527,7 +584,7 @@ ipcMain.handle('db:add-expenditure', (_e, { expenditureDate, category, descripti
         const result = db.prepare(`
             INSERT INTO expenditures (expenditure_date, category, description, amount, payment_method, voucher_number, vendor_name, account_id)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(expenditureDate, category, description, amount, paymentMethod || 'cash', voucherNumber, vendorName || null, accountId || null);
+        `).run(expenditureDate, category, description, amount, normalizedPaymentMethod, voucherNumber, vendorName || null, accountId || null);
         const expId = result.lastInsertRowid;
 
         // Look up expense account from expense_category_map, fallback to accountId or 5000
@@ -543,10 +600,28 @@ ipcMain.handle('db:add-expenditure', (_e, { expenditureDate, category, descripti
             expenseAccountId = db.prepare("SELECT id FROM accounts WHERE account_code = '5000'").get()?.id;
         }
 
-        const cashAccountCode = paymentMethod === 'bank' ? '1001' : '1000';
-        const cashAccount = db.prepare('SELECT id FROM accounts WHERE account_code = ?').get(cashAccountCode);
+        let paymentAccount = null;
+        if (normalizedPaymentMethod === 'bank') {
+            if (bankId) {
+                const bankRecord = db.prepare('SELECT account_id FROM banks WHERE id = ? AND is_active = 1').get(bankId);
+                if (bankRecord?.account_id) {
+                    paymentAccount = db.prepare('SELECT id FROM accounts WHERE id = ?').get(bankRecord.account_id);
+                }
+            }
+            if (!paymentAccount) {
+                const defaultBank = db.prepare('SELECT account_id FROM banks WHERE is_default = 1 AND is_active = 1').get();
+                if (defaultBank?.account_id) {
+                    paymentAccount = db.prepare('SELECT id FROM accounts WHERE id = ?').get(defaultBank.account_id);
+                }
+            }
+            if (!paymentAccount) {
+                paymentAccount = db.prepare("SELECT id FROM accounts WHERE account_code = '1001'").get();
+            }
+        } else {
+            paymentAccount = db.prepare("SELECT id FROM accounts WHERE account_code = '1000'").get();
+        }
 
-        if (expenseAccountId && cashAccount) {
+        if (expenseAccountId && paymentAccount) {
             const desc = `${category}: ${description}${vendorName ? ' (' + vendorName + ')' : ''}`;
 
             const jeResult = db.prepare(
@@ -555,17 +630,17 @@ ipcMain.handle('db:add-expenditure', (_e, { expenditureDate, category, descripti
             const jeId = jeResult.lastInsertRowid;
 
             db.prepare('INSERT INTO journal_lines (journal_entry_id, account_id, debit, credit) VALUES (?, ?, ?, 0)').run(jeId, expenseAccountId, amount);
-            db.prepare('INSERT INTO journal_lines (journal_entry_id, account_id, debit, credit) VALUES (?, ?, 0, ?)').run(jeId, cashAccount.id, amount);
+            db.prepare('INSERT INTO journal_lines (journal_entry_id, account_id, debit, credit) VALUES (?, ?, 0, ?)').run(jeId, paymentAccount.id, amount);
 
             db.prepare("INSERT INTO ledger_entries (entry_date, description, voucher_number, reference_type, reference_id, debit_account_id, amount, journal_entry_id) VALUES (?, ?, ?, 'expenditure', ?, ?, ?, ?)")
                 .run(expenditureDate, desc, voucherNumber, expId, expenseAccountId, amount, jeId);
             db.prepare("INSERT INTO ledger_entries (entry_date, description, voucher_number, reference_type, reference_id, credit_account_id, amount, journal_entry_id) VALUES (?, ?, ?, 'expenditure', ?, ?, ?, ?)")
-                .run(expenditureDate, desc, voucherNumber, expId, cashAccount.id, amount, jeId);
+                .run(expenditureDate, desc, voucherNumber, expId, paymentAccount.id, amount, jeId);
 
             db.prepare('INSERT INTO cashbook_entries (entry_date, description, voucher_number, cash_out, bank_out, journal_entry_id) VALUES (?, ?, ?, ?, ?, ?)')
                 .run(expenditureDate, desc, voucherNumber,
-                    paymentMethod === 'cash' ? amount : 0,
-                    paymentMethod === 'bank' ? amount : 0,
+                    normalizedPaymentMethod === 'cash' ? amount : 0,
+                    normalizedPaymentMethod === 'bank' ? amount : 0,
                     jeId);
 
             db.prepare('UPDATE expenditures SET journal_entry_id = ?, account_id = ? WHERE id = ?').run(jeId, expenseAccountId, expId);
@@ -591,8 +666,20 @@ ipcMain.handle('db:reverse-expenditure', (_e, { id, reason }) => {
         }
 
         // Post reversing journal entry (opposite signs)
-        const cashAccountCode = exp.payment_method === 'bank' ? '1001' : '1000';
-        const cashAccount = db.prepare('SELECT id FROM accounts WHERE account_code = ?').get(cashAccountCode);
+        let paymentAccount = null;
+        if (exp.journal_entry_id) {
+            paymentAccount = db.prepare(`
+                SELECT account_id as id
+                FROM journal_lines
+                WHERE journal_entry_id = ? AND credit > 0
+                ORDER BY id ASC
+                LIMIT 1
+            `).get(exp.journal_entry_id);
+        }
+        if (!paymentAccount) {
+            const fallbackCode = exp.payment_method === 'bank' ? '1001' : '1000';
+            paymentAccount = db.prepare('SELECT id FROM accounts WHERE account_code = ?').get(fallbackCode);
+        }
 
         // Look up by stored account_id first, then by category name match, then fall back to 5000
         const expenseAccount =
@@ -600,7 +687,7 @@ ipcMain.handle('db:reverse-expenditure', (_e, { id, reason }) => {
             db.prepare('SELECT id FROM accounts WHERE account_name LIKE ?').get(`%${exp.category}%`) ||
             db.prepare("SELECT id FROM accounts WHERE account_code = '5000'").get();
 
-        if (!cashAccount) throw new Error(`Cash/bank account not found for payment method: ${exp.payment_method}`);
+        if (!paymentAccount) throw new Error(`Cash/bank account not found for payment method: ${exp.payment_method}`);
         if (!expenseAccount) throw new Error(`Expense account not found for category: ${exp.category}`);
 
         if (true) {
@@ -614,12 +701,12 @@ ipcMain.handle('db:reverse-expenditure', (_e, { id, reason }) => {
 
             // Reverse: Cr. Expense, Dr. Cash/Bank
             db.prepare('INSERT INTO journal_lines (journal_entry_id, account_id, debit, credit) VALUES (?, ?, 0, ?)').run(jeId, expenseAccount.id, exp.amount);
-            db.prepare('INSERT INTO journal_lines (journal_entry_id, account_id, debit, credit) VALUES (?, ?, ?, 0)').run(jeId, cashAccount.id, exp.amount);
+            db.prepare('INSERT INTO journal_lines (journal_entry_id, account_id, debit, credit) VALUES (?, ?, ?, 0)').run(jeId, paymentAccount.id, exp.amount);
 
             db.prepare("INSERT INTO ledger_entries (entry_date, description, reference_type, reference_id, credit_account_id, amount, journal_entry_id) VALUES (?, ?, 'expenditure_reversal', ?, ?, ?, ?)")
                 .run(today, desc, id, expenseAccount.id, exp.amount, jeId);
             db.prepare("INSERT INTO ledger_entries (entry_date, description, reference_type, reference_id, debit_account_id, amount, journal_entry_id) VALUES (?, ?, 'expenditure_reversal', ?, ?, ?, ?)")
-                .run(today, desc, id, cashAccount.id, exp.amount, jeId);
+                .run(today, desc, id, paymentAccount.id, exp.amount, jeId);
 
             // Reversal cashbook: money comes BACK in (Dr. Cash/Bank, so cash_in/bank_in)
             db.prepare('INSERT INTO cashbook_entries (entry_date, description, cash_in, bank_in, cash_out, bank_out, journal_entry_id) VALUES (?, ?, ?, ?, 0, 0, ?)')
@@ -647,8 +734,77 @@ ipcMain.handle('db:delete-expenditure', (_e, id) => {
 ipcMain.handle('db:get-expenditure-categories', () => {
     const db = getDb();
     const used = db.prepare('SELECT DISTINCT category FROM expenditures WHERE is_deleted = 0 ORDER BY category').all().map(r => r.category);
-    const defaults = ['Salaries & Wages', 'Maintenance & Repairs', 'Utilities', 'Stationery & Office', 'Security', 'Gardening', 'Generator & Fuel', 'Legal & Professional', 'Bank Charges', 'Miscellaneous'];
+    const defaults = ['Salaries & Wages', 'Maintenance & Repairs', 'Utilities', 'Stationery & Office', 'Security', 'Gardening', 'Generator & Fuel', 'Legal & Professional', 'Gate Tool Tax', 'Bank Charges', 'Miscellaneous'];
     return [...new Set([...defaults, ...used])].sort();
+});
+
+ipcMain.handle('db:get-expense-category-master', () => {
+    const db = getDb();
+    return db.prepare(`
+        SELECT ecm.category_name, ecm.account_code, a.account_name, a.id as account_id
+        FROM expense_category_map ecm
+        LEFT JOIN accounts a ON a.account_code = ecm.account_code
+        ORDER BY ecm.category_name
+    `).all();
+});
+
+ipcMain.handle('db:add-expense-ledger-header', (_e, { name }) => {
+    const db = getDb();
+    const cleanName = String(name || '').trim();
+    if (!cleanName) throw new Error('Header name is required');
+
+    return db.transaction(() => {
+        const existsCategory = db.prepare('SELECT id FROM expense_category_map WHERE lower(category_name) = lower(?)').get(cleanName);
+        if (existsCategory) throw new Error('This expense header already exists');
+
+        const existingAccount = db.prepare(`
+            SELECT id, account_code
+            FROM accounts
+            WHERE lower(account_name) = lower(?)
+            LIMIT 1
+        `).get(cleanName);
+
+        let accountCode;
+        let accountId;
+        if (existingAccount) {
+            accountCode = existingAccount.account_code;
+            accountId = existingAccount.id;
+            db.prepare(`
+                UPDATE accounts
+                SET account_type = 'expense', normal_balance = 'debit', is_active = 1
+                WHERE id = ?
+            `).run(accountId);
+        } else {
+            const lastCode = db.prepare(`
+                SELECT account_code
+                FROM accounts
+                WHERE account_type = 'expense' AND account_code GLOB '[0-9]*'
+                ORDER BY CAST(account_code AS INTEGER) DESC
+                LIMIT 1
+            `).get();
+
+            const nextCode = Math.max(5000, Number(lastCode?.account_code || 5039) + 1);
+            accountCode = String(nextCode);
+
+            const inserted = db.prepare(`
+                INSERT INTO accounts (account_code, account_name, account_type, normal_balance, is_active)
+                VALUES (?, ?, 'expense', 'debit', 1)
+            `).run(accountCode, cleanName);
+            accountId = inserted.lastInsertRowid;
+        }
+
+        db.prepare(`
+            INSERT INTO expense_category_map (category_name, account_code)
+            VALUES (?, ?)
+        `).run(cleanName, accountCode);
+
+        writeAuditLog(db, 'expense_category_map', cleanName, 'CREATE', {
+            category_name: cleanName,
+            account_code: accountCode,
+        });
+
+        return { success: true, accountCode, accountId, categoryName: cleanName };
+    })();
 });
 
 // ── Audit Log IPC ─────────────────────────────────────────────
@@ -699,21 +855,59 @@ ipcMain.handle('db:generate-monthly-bills', (_e, { billingMonth, notice }) => {
     const tenantChallanAmount = parseFloat(settingsMap['tenant_challan_amount'] || '2500');
     let generated = 0;
 
+    const MONTHLY_CHARGE_MAP = {};
+    try {
+        const chargeMapRows = db.prepare('SELECT charge_name, account_code FROM charge_account_map').all();
+        for (const r of chargeMapRows) MONTHLY_CHARGE_MAP[r.charge_name] = r.account_code;
+    } catch {
+        Object.assign(MONTHLY_CHARGE_MAP, {
+            'Monthly Contribution': '4000',
+                'Contribution for Commercial property - Rs. 1500/- per month for vacant and single story': '4000',
+                'Contribution for Commercial property': '4000',
+                'Base Contribution': '4000',
+            'Monthly Tenant Challan': '4004',
+                'Contribution for Mosque': '4001',
+                'Mosque Contribution': '4001',
+            'Mosque Fund': '4001',
+                'Contribution for garbage collection if upper stories are used for residential purpose': '4002',
+                'Garbage Collection': '4002',
+            'Garbage Charges': '4002',
+                'Contribution for Aquifer if water connection is provided': '4003',
+                'Aquifer Contribution': '4003',
+            'Aquifer Charges': '4003',
+                'Contribution for each constructed story other than ground floor': '4000',
+                'Per Extra Floor': '4000',
+        });
+    }
+
+    const receivableAccount = db.prepare("SELECT id FROM accounts WHERE account_code = '1200'").get();
+
     // Enforce month locking — refuse to generate bills for a locked month
     const isLocked = db.prepare('SELECT id FROM locked_months WHERE billing_month = ?').get(billingMonth);
     if (isLocked) throw new Error(`${billingMonth} is locked. Unlock it before generating bills.`);
 
     db.transaction(() => {
         for (const plot of plots) {
+            const owner = db.prepare("SELECT member_id FROM plot_ownership WHERE plot_id = ? AND (end_date IS NULL OR end_date = '') ORDER BY start_date DESC, id DESC LIMIT 1").get(plot.id);
             const existing = db.prepare("SELECT id FROM bills WHERE plot_id = ? AND billing_month = ? AND bill_type = 'monthly' AND is_deleted = 0").get(plot.id, billingMonth);
             if (!existing) {
-                const owner = db.prepare("SELECT member_id FROM plot_ownership WHERE plot_id = ? AND (end_date IS NULL OR end_date = '') ORDER BY start_date DESC, id DESC LIMIT 1").get(plot.id);
                 const items = [];
 
                 for (const t of templates.filter(t => t.plot_type === plot.plot_type)) {
                     if (/mosque/i.test(t.charge_name) && !plot.has_mosque_contribution) {
                         continue;
                     }
+
+                    // Safety fallback for legacy/misaligned template metadata.
+                    // If aquifer is configured but condition flags are incorrect in DB,
+                    // still honor water-connection-based inclusion for commercial plots.
+                    if (plot.plot_type === 'commercial' && /aquifer/i.test(t.charge_name)) {
+                        if (plot.has_water_connection) {
+                            items.push({ charge_name: t.charge_name, amount: t.amount });
+                        }
+                        continue;
+                    }
+
                     if (t.is_conditional && t.condition_field) {
                         if (t.condition_field === 'commercial_floors') {
                             const floors = plot.commercial_floors || 0;
@@ -726,55 +920,10 @@ ipcMain.handle('db:generate-monthly-bills', (_e, { billingMonth, notice }) => {
                     }
                 }
 
-                // Per-charge historical outstanding — reads actual bill_items from previous unpaid bills
-                // Handles different rates per month automatically since it reads real bill_items amounts
-                const historicalByCharge = db.prepare(`
-                    SELECT
-                        bi.charge_name,
-                        COALESCE(SUM(
-                            CASE WHEN b.subtotal > 0
-                                THEN bi.amount * (b.balance_due / b.subtotal)
-                                ELSE 0
-                            END
-                        ), 0) as owed
-                    FROM bill_items bi
-                    JOIN bills b ON bi.bill_id = b.id
-                    WHERE b.plot_id = ?
-                      AND b.billing_month < ?
-                      AND b.balance_due > 0.01
-                      AND b.is_deleted = 0
-                      AND bi.charge_name NOT LIKE '%Arrears%'
-                      AND bi.charge_name NOT LIKE '%Late Fee%'
-                    GROUP BY bi.charge_name
-                `).all(plot.id, billingMonth);
-
-                // Build lookup: charge_name → historical owed amount
-                const historicalMap = {};
-                for (const row of historicalByCharge) {
-                    historicalMap[row.charge_name] = row.owed || 0;
-                }
-
-                // Total arrears = sum of all historical owed (stored in bills.arrears for reference)
-                const arrears = Object.values(historicalMap).reduce((s, v) => s + v, 0);
-
                 if (items.length > 0) {
-                    // Merge current charges with historical — each charge gets current + its own arrears
-                    const mergedItems = items.map(item => ({
-                        charge_name: item.charge_name,
-                        amount: item.amount + (historicalMap[item.charge_name] || 0)
-                    }));
-
-                    // Any historical charges not in current month (e.g. charge type removed later)
-                    // still get their own row so nothing is lost
-                    for (const [charge_name, owed] of Object.entries(historicalMap)) {
-                        if (owed > 0.01 && !items.find(i => i.charge_name === charge_name)) {
-                            mergedItems.push({ charge_name, amount: owed });
-                        }
-                    }
-
-                    const subtotal = items.reduce((sum, i) => sum + i.amount, 0); // current month only
-                    const total    = mergedItems.reduce((sum, i) => sum + i.amount, 0); // current + arrears
-
+                    const subtotal = items.reduce((sum, i) => sum + i.amount, 0);
+                    const arrears = sumStoredArrears(db, { plotId: plot.id, billingMonth });
+                    const total = subtotal + arrears;
                     const billDate  = billingMonth + '-01';
                     const dueDate   = new Date(billDate);
                     dueDate.setDate(dueDate.getDate() + dueDays);
@@ -788,17 +937,70 @@ ipcMain.handle('db:generate-monthly-bills', (_e, { billingMonth, notice }) => {
                         VALUES (?, ?, ?, 'monthly', ?, ?, ?, ?, ?, ?, ?, 'unpaid', ?)
                     `).run(billNumber, plot.id, owner?.member_id || null,
                         billDate, dueDateStr, billingMonth,
-                        subtotal,  // subtotal = current month charges only
-                        arrears,   // arrears = total historical owed (kept for reference)
-                        total,     // total_amount = current + historical merged
-                        total,     // balance_due starts equal to total
+                        subtotal,
+                        arrears,
+                        total,
+                        total,
                         notice || null
                     );
 
                     const billId = result.lastInsertRowid;
-                    const insertItem = db.prepare('INSERT INTO bill_items (bill_id, charge_name, amount) VALUES (?, ?, ?)');
-                    for (const item of mergedItems) insertItem.run(billId, item.charge_name, item.amount);
-                    // NOTE: No "Arrears (Previous Balance)" row inserted — arrears are merged per charge above
+                    const insertItem = db.prepare('INSERT INTO bill_items (bill_id, charge_name, amount, is_custom) VALUES (?, ?, ?, 0)');
+                    for (const item of items) insertItem.run(billId, item.charge_name, item.amount);
+                    if (arrears > 0.01) insertItem.run(billId, 'Arrears', arrears);
+
+                    // Link monthly member fees to Member Receivables (accrual posting).
+                    if ((subtotal || 0) > 0.01 && receivableAccount?.id) {
+                        const billDateForPosting = billDate;
+                        const jeResult = db.prepare(
+                            "INSERT INTO journal_entries (entry_date, description, reference_type, reference_id) VALUES (?, ?, 'bill_generation', ?)"
+                        ).run(
+                            billDateForPosting,
+                            `Monthly bill generated for Plot ${plot.plot_number} (${billingMonth})`,
+                            billId
+                        );
+                        const jeId = jeResult.lastInsertRowid;
+
+                        db.prepare(
+                            'INSERT INTO journal_lines (journal_entry_id, account_id, debit, credit) VALUES (?, ?, ?, 0)'
+                        ).run(jeId, receivableAccount.id, subtotal);
+
+                        db.prepare(
+                            "INSERT INTO ledger_entries (entry_date, description, reference_type, reference_id, debit_account_id, amount, journal_entry_id) VALUES (?, ?, 'bill_generation', ?, ?, ?, ?)"
+                        ).run(
+                            billDateForPosting,
+                            `Monthly bill generated for Plot ${plot.plot_number}`,
+                            billId,
+                            receivableAccount.id,
+                            subtotal,
+                            jeId
+                        );
+
+                        const creditsByAccount = {};
+                        for (const item of items) {
+                            const accountCode = MONTHLY_CHARGE_MAP[item.charge_name] || '4000';
+                            creditsByAccount[accountCode] = (creditsByAccount[accountCode] || 0) + Number(item.amount || 0);
+                        }
+
+                        for (const [accountCode, amountValue] of Object.entries(creditsByAccount)) {
+                            if (amountValue < 0.005) continue;
+                            const creditAcc = db.prepare('SELECT id FROM accounts WHERE account_code = ?').get(accountCode);
+                            if (!creditAcc) continue;
+                            db.prepare(
+                                'INSERT INTO journal_lines (journal_entry_id, account_id, debit, credit) VALUES (?, ?, 0, ?)'
+                            ).run(jeId, creditAcc.id, amountValue);
+                            db.prepare(
+                                "INSERT INTO ledger_entries (entry_date, description, reference_type, reference_id, credit_account_id, amount, journal_entry_id) VALUES (?, ?, 'bill_generation', ?, ?, ?, ?)"
+                            ).run(
+                                billDateForPosting,
+                                `Monthly bill generated for Plot ${plot.plot_number}`,
+                                billId,
+                                creditAcc.id,
+                                amountValue,
+                                jeId
+                            );
+                        }
+                    }
 
                     // Auto-apply any advance credit for this plot
                     const credit = db.prepare('SELECT * FROM plot_credits WHERE plot_id = ?').get(plot.id);
@@ -837,54 +1039,17 @@ ipcMain.handle('db:generate-monthly-bills', (_e, { billingMonth, notice }) => {
                     const templateByName = (name) =>
                         templates.find((t) => t.plot_type === plot.plot_type && t.charge_name === name);
 
-                    const mosqueTemplate = templateByName('Mosque Contribution');
-                    const aquiferTemplate = templateByName('Aquifer Contribution');
-                    const garbageTemplate = templateByName('Garbage Collection');
+                    const mosqueTemplate = templateByName('Contribution for Mosque') || templateByName('Mosque Contribution');
+                    const aquiferTemplate = templateByName('Contribution for Aquifer if water connection is provided') || templateByName('Aquifer Contribution');
+                    const garbageTemplate = templateByName('Contribution for garbage collection if upper stories are used for residential purpose') || templateByName('Garbage Collection');
 
                     if (mosqueTemplate) tenantItems.push({ charge_name: mosqueTemplate.charge_name, amount: mosqueTemplate.amount });
                     if (aquiferTemplate) tenantItems.push({ charge_name: aquiferTemplate.charge_name, amount: aquiferTemplate.amount });
                     if (garbageTemplate) tenantItems.push({ charge_name: garbageTemplate.charge_name, amount: garbageTemplate.amount });
 
-                    const historicalByCharge = db.prepare(`
-                        SELECT
-                            bi.charge_name,
-                            COALESCE(SUM(
-                                CASE WHEN b.subtotal > 0
-                                    THEN bi.amount * (b.balance_due / b.subtotal)
-                                    ELSE 0
-                                END
-                            ), 0) as owed
-                        FROM bill_items bi
-                        JOIN bills b ON bi.bill_id = b.id
-                        WHERE b.tenant_id = ?
-                          AND b.bill_type = 'tenant'
-                          AND b.billing_month < ?
-                          AND b.balance_due > 0.01
-                          AND b.is_deleted = 0
-                          AND bi.charge_name NOT LIKE '%Arrears%'
-                        GROUP BY bi.charge_name
-                    `).all(tenant.id, billingMonth);
-
-                    const historicalMap = {};
-                    for (const row of historicalByCharge) {
-                        historicalMap[row.charge_name] = row.owed || 0;
-                    }
-
-                    const mergedTenantItems = tenantItems.map((item) => ({
-                        charge_name: item.charge_name,
-                        amount: item.amount + (historicalMap[item.charge_name] || 0),
-                    }));
-
-                    // Preserve old charge types by merging them into the same header list.
-                    for (const [charge_name, owed] of Object.entries(historicalMap)) {
-                        if (owed > 0.01 && !tenantItems.find((i) => i.charge_name === charge_name)) {
-                            mergedTenantItems.push({ charge_name, amount: owed });
-                        }
-                    }
-
                     const subtotal = tenantItems.reduce((sum, i) => sum + i.amount, 0);
-                    const total = mergedTenantItems.reduce((sum, i) => sum + i.amount, 0);
-                    const arrears = Math.max(0, total - subtotal);
+                    const arrears = sumStoredArrears(db, { tenantId: tenant.id, billingMonth, billType: 'tenant' });
+                    const total = subtotal + arrears;
 
                     const billDate = billingMonth + '-01';
                     const dueDate = new Date(billDate);
@@ -909,24 +1074,69 @@ ipcMain.handle('db:generate-monthly-bills', (_e, { billingMonth, notice }) => {
                         notice || null
                     );
 
-                    const insertTenantItem = db.prepare('INSERT INTO bill_items (bill_id, charge_name, amount) VALUES (?, ?, ?)');
-                    for (const item of mergedTenantItems) {
+                    const insertTenantItem = db.prepare('INSERT INTO bill_items (bill_id, charge_name, amount, is_custom) VALUES (?, ?, ?, 0)');
+                    for (const item of tenantItems) {
                         insertTenantItem.run(tenantBillResult.lastInsertRowid, item.charge_name, item.amount);
+                    }
+                    if (arrears > 0.01) insertTenantItem.run(tenantBillResult.lastInsertRowid, 'Arrears', arrears);
+
+                    // Tenant monthly challan accrual: debit receivable, credit mapped revenue.
+                    if ((subtotal || 0) > 0.01 && receivableAccount?.id) {
+                        const tenantBillId = tenantBillResult.lastInsertRowid;
+                        const jeResult = db.prepare(
+                            "INSERT INTO journal_entries (entry_date, description, reference_type, reference_id) VALUES (?, ?, 'bill_generation', ?)"
+                        ).run(
+                            billDate,
+                            `Tenant bill generated for Plot ${plot.plot_number} (${billingMonth})`,
+                            tenantBillId
+                        );
+                        const jeId = jeResult.lastInsertRowid;
+
+                        db.prepare(
+                            'INSERT INTO journal_lines (journal_entry_id, account_id, debit, credit) VALUES (?, ?, ?, 0)'
+                        ).run(jeId, receivableAccount.id, subtotal);
+
+                        db.prepare(
+                            "INSERT INTO ledger_entries (entry_date, description, reference_type, reference_id, debit_account_id, amount, journal_entry_id) VALUES (?, ?, 'bill_generation', ?, ?, ?, ?)"
+                        ).run(
+                            billDate,
+                            `Tenant bill generated for Plot ${plot.plot_number}`,
+                            tenantBillId,
+                            receivableAccount.id,
+                            subtotal,
+                            jeId
+                        );
+
+                        const creditsByAccount = {};
+                        for (const item of tenantItems) {
+                            const accountCode = MONTHLY_CHARGE_MAP[item.charge_name] || '4000';
+                            creditsByAccount[accountCode] = (creditsByAccount[accountCode] || 0) + Number(item.amount || 0);
+                        }
+
+                        for (const [accountCode, amountValue] of Object.entries(creditsByAccount)) {
+                            if (amountValue < 0.005) continue;
+                            const creditAcc = db.prepare('SELECT id FROM accounts WHERE account_code = ?').get(accountCode);
+                            if (!creditAcc) continue;
+                            db.prepare(
+                                'INSERT INTO journal_lines (journal_entry_id, account_id, debit, credit) VALUES (?, ?, 0, ?)'
+                            ).run(jeId, creditAcc.id, amountValue);
+                            db.prepare(
+                                "INSERT INTO ledger_entries (entry_date, description, reference_type, reference_id, credit_account_id, amount, journal_entry_id) VALUES (?, ?, 'bill_generation', ?, ?, ?, ?)"
+                            ).run(
+                                billDate,
+                                `Tenant bill generated for Plot ${plot.plot_number}`,
+                                tenantBillId,
+                                creditAcc.id,
+                                amountValue,
+                                jeId
+                            );
+                        }
                     }
                     generated++;
                 }
             }
         }
 
-        // After all plots are processed — recalc every plot that has unpaid bills
-        const plotsWithUnpaid = db.prepare(`
-          SELECT DISTINCT plot_id FROM bills
-          WHERE status IN ('unpaid','partial') AND is_deleted = 0
-        `).all();
-
-        for (const p of plotsWithUnpaid) {
-            recalcPlotBills(db, p.plot_id);
-        }
     })();
     return { generated, month: billingMonth };
 });
@@ -1063,12 +1273,32 @@ ipcMain.handle('db:get-bills', (_e, filters) => {
 ipcMain.handle('db:get-bill-detail', (_e, billId) => {
     const db = getDb();
     const bill = db.prepare(`
-        SELECT b.*, p.plot_number, p.marla_size, p.plot_type, m.name as owner_name, m.phone, m.address
+        SELECT b.*, p.plot_number, p.marla_size, p.plot_type, p.commercial_floors, m.name as owner_name, m.phone, m.address
         FROM bills b LEFT JOIN plots p ON b.plot_id = p.id LEFT JOIN members m ON b.member_id = m.id WHERE b.id = ?
     `).get(billId);
     const items = db.prepare('SELECT * FROM bill_items WHERE bill_id = ? ORDER BY id').all(billId);
     const payments = db.prepare('SELECT * FROM payments WHERE bill_id = ? ORDER BY payment_date DESC').all(billId);
-    return { bill, items, payments };
+    const adjustments = db.prepare(`
+        SELECT a.*, u.display_name as created_by_name, u.username as created_by_username
+        FROM adjustments a
+        LEFT JOIN users u ON u.id = a.created_by
+        WHERE a.bill_id = ?
+        ORDER BY a.created_at DESC, a.id DESC
+    `).all(billId);
+    const adjustmentTotal = adjustments.reduce((sum, row) => sum + (row.amount || 0), 0);
+    return {
+        bill,
+        items,
+        payments,
+        adjustments,
+        summary: {
+            subtotal: bill?.subtotal || 0,
+            adjustmentTotal,
+            totalAmount: bill?.total_amount || 0,
+            amountPaid: bill?.amount_paid || 0,
+            balanceDue: bill?.balance_due || 0,
+        }
+    };
 });
 
 ipcMain.handle('db:add-custom-bill-item', (_e, { billId, chargeName, amount }) => {
@@ -1076,9 +1306,68 @@ ipcMain.handle('db:add-custom-bill-item', (_e, { billId, chargeName, amount }) =
     const bill = db.prepare('SELECT status FROM bills WHERE id = ?').get(billId);
     if (!bill) throw new Error('Bill not found');
     if (bill.status === 'paid') throw new Error('Cannot modify a paid bill');
+    throw new Error('Bills are immutable after generation');
+});
+
+ipcMain.handle('db:add-adjustment', (_e, { billId, amount, reason, createdBy }) => {
+    const db = getDb();
+    const bill = db.prepare('SELECT * FROM bills WHERE id = ? AND is_deleted = 0').get(billId);
+    if (!bill) throw new Error('Bill not found');
+    if (bill.status === 'voided') throw new Error('Cannot adjust a voided bill');
+
+    const numericAmount = Number(amount);
+    if (!Number.isFinite(numericAmount) || Math.abs(numericAmount) < 0.01) {
+        throw new Error('Enter a valid adjustment amount');
+    }
+
+    const note = String(reason || '').trim();
+    if (!note) throw new Error('Reason is required');
+
     return db.transaction(() => {
-        db.prepare('INSERT INTO bill_items (bill_id, charge_name, amount, is_custom) VALUES (?, ?, ?, 1)').run(billId, chargeName, amount);
-        db.prepare('UPDATE bills SET subtotal = subtotal + ?, total_amount = total_amount + ?, balance_due = balance_due + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(amount, amount, amount, billId);
+        const result = db.prepare(`
+            INSERT INTO adjustments (bill_id, house_id, amount, reason, created_by)
+            VALUES (?, ?, ?, ?, ?)
+        `).run(billId, bill.plot_id, numericAmount, note, createdBy || null);
+
+        writeAuditLog(db, 'adjustments', result.lastInsertRowid, 'CREATE', {
+            billId,
+            houseId: bill.plot_id,
+            amount: numericAmount,
+            reason: note,
+            createdBy: createdBy || null,
+        });
+
+        return syncBillTotals(db, billId);
+    })();
+});
+
+ipcMain.handle('db:void-bill', (_e, { billId, reason, voidedBy }) => {
+    const db = getDb();
+    const bill = db.prepare('SELECT * FROM bills WHERE id = ? AND is_deleted = 0').get(billId);
+    if (!bill) throw new Error('Bill not found');
+    if (bill.status === 'voided') throw new Error('Bill is already voided');
+
+    const note = String(reason || '').trim();
+    if (!note) throw new Error('Reason is required');
+
+    return db.transaction(() => {
+        db.prepare(`
+            UPDATE bills SET
+                status = 'voided',
+                balance_due = 0,
+                void_reason = ?,
+                voided_by = ?,
+                voided_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        `).run(note, voidedBy || null, billId);
+
+        writeAuditLog(db, 'bills', billId, 'VOID', {
+            reason: note,
+            voidedBy: voidedBy || null,
+        });
+
+        return { success: true };
     })();
 });
 
@@ -1100,9 +1389,21 @@ ipcMain.handle('db:get-all-bills', (_e, filters) => {
 });
 
 // ── Payments ──────────────────────────────────────────────────
-ipcMain.handle('db:record-payment', (_e, { billId, amount, paymentMethod, receiptNumber, notes }) => {
+ipcMain.handle('db:record-payment', (_e, { billId, amount, paymentMethod, bankId, receiptNumber, notes }) => {
   const db = getDb();
+
+    // Backward-compatible guard: older DB files may miss this column if they skipped migrations.
+    const hasBankIdColumn = db.prepare(`
+        SELECT 1
+        FROM pragma_table_info('payments')
+        WHERE name = 'bank_id'
+    `).get();
+    if (!hasBankIdColumn) {
+        db.exec(`ALTER TABLE payments ADD COLUMN bank_id INTEGER REFERENCES banks(id)`);
+    }
+
   return db.transaction(() => {
+                const normalizedPaymentMethod = paymentMethod === 'cash' ? 'cash' : 'bank';
 
     const bill = db.prepare(`
       SELECT b.*, p.plot_number, p.id as pid
@@ -1110,6 +1411,20 @@ ipcMain.handle('db:record-payment', (_e, { billId, amount, paymentMethod, receip
       WHERE b.id = ?
     `).get(billId);
     if (!bill) throw new Error('Bill not found');
+    if (bill.status === 'voided') throw new Error('Cannot record payment on a voided bill');
+
+        let selectedBank = null;
+        if (normalizedPaymentMethod === 'bank') {
+            if (!bankId) throw new Error('Select a bank account for bank payments');
+            selectedBank = db.prepare(`
+                SELECT b.*, a.account_code, a.account_name as linked_account_name
+                FROM banks b
+                LEFT JOIN accounts a ON b.account_id = a.id
+                WHERE b.id = ? AND b.is_active = 1
+            `).get(bankId);
+            if (!selectedBank) throw new Error('Selected bank was not found');
+            if (!selectedBank.account_id) throw new Error('Selected bank is not linked to an account');
+        }
 
     // ── Receipt number ──────────────────────────────────────
     const today = new Date().toISOString().split('T')[0];
@@ -1125,9 +1440,9 @@ ipcMain.handle('db:record-payment', (_e, { billId, amount, paymentMethod, receip
 
     // ── Insert master payment ────────────────────────────────
     const payResult = db.prepare(`
-      INSERT INTO payments (bill_id, payment_date, amount, payment_method, receipt_number, notes)
-      VALUES (?, date('now'), ?, ?, ?, ?)
-    `).run(billId, amount, paymentMethod || 'cash', finalReceipt, notes || null);
+            INSERT INTO payments (bill_id, payment_date, amount, payment_method, bank_id, receipt_number, notes)
+            VALUES (?, date('now'), ?, ?, ?, ?, ?)
+                `).run(billId, amount, normalizedPaymentMethod, selectedBank?.id || null, finalReceipt, notes || null);
     const paymentId = payResult.lastInsertRowid;
 
     // ── Build charge → account map from DB (dynamic, respects future edits) ──
@@ -1140,15 +1455,21 @@ ipcMain.handle('db:record-payment', (_e, { billId, amount, paymentMethod, receip
       // Table doesn't exist yet — use defaults until migration 15 runs
       Object.assign(CHARGE_MAP, {
         'Monthly Contribution': '4000',
-        'Base Contribution': '4000',
+                'Contribution for Commercial property - Rs. 1500/- per month for vacant and single story': '4000',
+                'Contribution for Commercial property': '4000',
+                'Base Contribution': '4000',
         'Monthly Tenant Challan': '4004',
-        'Mosque Contribution': '4001',
+                'Contribution for Mosque': '4001',
+                'Mosque Contribution': '4001',
         'Mosque Fund': '4001',
-        'Garbage Collection': '4002',
+                'Contribution for garbage collection if upper stories are used for residential purpose': '4002',
+                'Garbage Collection': '4002',
         'Garbage Charges': '4002',
-        'Aquifer Contribution': '4003',
+                'Contribution for Aquifer if water connection is provided': '4003',
+                'Aquifer Contribution': '4003',
         'Aquifer Charges': '4003',
-        'Per Extra Floor': '4000',
+                'Contribution for each constructed story other than ground floor': '4000',
+                'Per Extra Floor': '4000',
       });
     }
 
@@ -1162,12 +1483,16 @@ ipcMain.handle('db:record-payment', (_e, { billId, amount, paymentMethod, receip
     let remaining = amount;
     
     // ── Journal entry (one per payment, multiple credit lines) ──
-    const debitAccountCode = paymentMethod === 'cash' ? '1000' : '1001';
-    const debitAccount = db.prepare(
-      'SELECT id FROM accounts WHERE account_code = ?'
-    ).get(debitAccountCode);
+        const debitAccountCode = normalizedPaymentMethod === 'cash'
+            ? '1000'
+            : selectedBank?.account_code || '1001';
+        const debitAccount = normalizedPaymentMethod === 'cash'
+            ? db.prepare('SELECT id FROM accounts WHERE account_code = ?').get('1000')
+            : db.prepare('SELECT id FROM accounts WHERE id = ?').get(selectedBank.account_id);
 
-    const desc = `Payment received — Plot ${bill.plot_number} (${finalReceipt})`;
+        const desc = normalizedPaymentMethod === 'cash'
+            ? `Payment received — Plot ${bill.plot_number} (${finalReceipt})`
+            : `Payment received via ${selectedBank.bank_name} — Plot ${bill.plot_number} (${finalReceipt})`;
     const jeResult = db.prepare(`
       INSERT INTO journal_entries
         (entry_date, description, voucher_number, reference_type, reference_id)
@@ -1214,7 +1539,13 @@ ipcMain.handle('db:record-payment', (_e, { billId, amount, paymentMethod, receip
         WHERE id = ?
       `).run(newPaid, newBalance, newStatus, ub.id);
 
-      // ── Split credit proportionally across this bill's charges ──
+            // Monthly owner bills clear receivable (1200) on collection.
+            if (ub.bill_type === 'monthly' || ub.bill_type === 'tenant') {
+                addCredit('1200', apply);
+                continue;
+            }
+
+            // ── Split credit proportionally across this bill's charges ──
       // Get bill_items for THIS bill (uses actual amounts, handles old rates)
       const items = db.prepare(`
         SELECT bi.charge_name, bi.amount
@@ -1333,13 +1664,10 @@ ipcMain.handle('db:record-payment', (_e, { billId, amount, paymentMethod, receip
     }
 
     writeAuditLog(db, 'payments', paymentId, 'PAYMENT_FIFO', {
-      billId, amount, paymentMethod,
+            billId, amount, paymentMethod: normalizedPaymentMethod, bankId: selectedBank?.id || null,
       receiptNumber: finalReceipt,
       fundBreakdown: creditAccumulator
     });
-
-    // Recalc all unpaid bills for this plot after payment
-    recalcPlotBills(db, bill.plot_id);
 
     return {
       receiptNumber: finalReceipt,
@@ -1518,6 +1846,48 @@ ipcMain.handle('db:create-special-bill', (_e, payload) => {
     const totalAmount = normalizedItems.reduce((sum, item) => sum + item.amount, 0);
     
     return db.transaction(() => {
+        const receivableAccount = db.prepare("SELECT id FROM accounts WHERE account_code = '1200'").get();
+        const chargeMap = {};
+        try {
+            const chargeMapRows = db.prepare('SELECT charge_name, account_code FROM charge_account_map').all();
+            for (const row of chargeMapRows) chargeMap[row.charge_name] = row.account_code;
+        } catch {
+            Object.assign(chargeMap, {
+                'Others': '4021',
+            });
+        }
+
+        const hasCustomCharge = db.prepare(`
+            SELECT 1
+            FROM onetime_charges
+            WHERE lower(trim(charge_name)) = lower(trim(?))
+        `);
+        const upsertCustomCharge = db.prepare(`
+            INSERT INTO onetime_charges (
+                charge_name, base_amount, is_percentage, percentage_value, varies_by_marla, is_active, notes
+            ) VALUES (?, ?, 0, NULL, 0, 1, ?)
+            ON CONFLICT(charge_name) DO UPDATE SET
+                base_amount = excluded.base_amount,
+                is_percentage = excluded.is_percentage,
+                percentage_value = excluded.percentage_value,
+                varies_by_marla = excluded.varies_by_marla,
+                is_active = 1,
+                notes = excluded.notes
+        `);
+        const upsertSpecialChargeMap = db.prepare(`
+            INSERT INTO charge_account_map (charge_name, account_code)
+            VALUES (?, '4021')
+            ON CONFLICT(charge_name) DO UPDATE SET account_code = excluded.account_code
+        `);
+
+        for (const item of normalizedItems) {
+            const exists = hasCustomCharge.get(item.chargeName);
+            if (!exists) {
+                upsertCustomCharge.run(item.chargeName, item.amount, 'Custom special charge');
+            }
+            upsertSpecialChargeMap.run(item.chargeName);
+        }
+
         const result = db.prepare(`
             INSERT INTO bills (bill_number, plot_id, member_id, bill_type, bill_date, due_date, billing_month,
                              subtotal, arrears, total_amount, balance_due, status, notes)
@@ -1529,7 +1899,54 @@ ipcMain.handle('db:create-special-bill', (_e, payload) => {
         for (const item of normalizedItems) {
             insertItem.run(result.lastInsertRowid, item.chargeName, item.amount);
         }
+
+        if ((totalAmount || 0) > 0.01 && receivableAccount?.id) {
+            const billId = result.lastInsertRowid;
+            const billDescription = `Special bill generated for Plot ${plot.plot_number}`;
+            const jeResult = db.prepare(
+                "INSERT INTO journal_entries (entry_date, description, reference_type, reference_id) VALUES (?, ?, 'bill_generation', ?)"
+            ).run(today, billDescription, billId);
+            const jeId = jeResult.lastInsertRowid;
+
+            db.prepare(
+                'INSERT INTO journal_lines (journal_entry_id, account_id, debit, credit) VALUES (?, ?, ?, 0)'
+            ).run(jeId, receivableAccount.id, totalAmount);
+
+            db.prepare(
+                "INSERT INTO ledger_entries (entry_date, description, reference_type, reference_id, debit_account_id, amount, journal_entry_id) VALUES (?, ?, 'bill_generation', ?, ?, ?, ?)"
+            ).run(today, billDescription, billId, receivableAccount.id, totalAmount, jeId);
+
+            const creditsByAccount = {};
+            for (const item of normalizedItems) {
+                const accountCode = chargeMap[item.chargeName] || '4000';
+                creditsByAccount[accountCode] = (creditsByAccount[accountCode] || 0) + Number(item.amount || 0);
+            }
+
+            for (const [accountCode, amountValue] of Object.entries(creditsByAccount)) {
+                if (amountValue < 0.005) continue;
+                const creditAccount = db.prepare('SELECT id FROM accounts WHERE account_code = ?').get(accountCode);
+                if (!creditAccount) continue;
+
+                db.prepare(
+                    'INSERT INTO journal_lines (journal_entry_id, account_id, debit, credit) VALUES (?, ?, 0, ?)'
+                ).run(jeId, creditAccount.id, amountValue);
+
+                db.prepare(
+                    "INSERT INTO ledger_entries (entry_date, description, reference_type, reference_id, credit_account_id, amount, journal_entry_id) VALUES (?, ?, 'bill_generation', ?, ?, ?, ?)"
+                ).run(today, billDescription, billId, creditAccount.id, amountValue, jeId);
+            }
+        }
     })();
+});
+
+ipcMain.handle('db:generate-special-bills-all', (_e, payload) => {
+    return {
+        generated: 0,
+        skipped: 0,
+        totalPlots: 0,
+        billingMonth: payload?.billingMonth || null,
+        message: 'Special bill batch generation is disabled while bills are immutable.'
+    };
 });
 
 // ── Accounting ────────────────────────────────────────────────
@@ -1554,6 +1971,59 @@ ipcMain.handle('db:get-ledger-entries', (_e, { accountId, startDate, endDate }) 
           AND le.entry_date BETWEEN ? AND ?
         ORDER BY le.entry_date ASC, le.id ASC
     `).all(accountId, accountId, accountId, accountId, startDate, endDate);
+});
+
+ipcMain.handle('db:get-ledger-headings-summary', (_e, { startDate, endDate }) => {
+    const db = getDb();
+    const start = startDate || '1900-01-01';
+    const end = endDate || '2999-12-31';
+
+    return db.prepare(`
+        SELECT
+            a.id,
+            a.account_code,
+            a.account_name,
+            a.account_type,
+            a.normal_balance,
+            a.parent_id,
+            p.account_name AS parent_name,
+            COALESCE(le.total_debit, 0) AS total_debit,
+            COALESCE(le.total_credit, 0) AS total_credit,
+            COALESCE(le.entry_count, 0) AS entry_count,
+            COALESCE(ch.child_count, 0) AS child_count
+        FROM accounts a
+        LEFT JOIN accounts p ON p.id = a.parent_id
+        LEFT JOIN (
+            SELECT
+                x.account_id,
+                SUM(CASE WHEN x.side = 'debit' THEN x.amount ELSE 0 END) AS total_debit,
+                SUM(CASE WHEN x.side = 'credit' THEN x.amount ELSE 0 END) AS total_credit,
+                COUNT(DISTINCT x.entry_id) AS entry_count
+            FROM (
+                SELECT id AS entry_id, debit_account_id AS account_id, amount, 'debit' AS side
+                FROM ledger_entries
+                WHERE entry_date BETWEEN ? AND ?
+                UNION ALL
+                SELECT id AS entry_id, credit_account_id AS account_id, amount, 'credit' AS side
+                FROM ledger_entries
+                WHERE entry_date BETWEEN ? AND ?
+            ) x
+            GROUP BY x.account_id
+        ) le ON le.account_id = a.id
+        LEFT JOIN (
+            SELECT parent_id, COUNT(*) AS child_count
+            FROM accounts
+            WHERE parent_id IS NOT NULL AND is_active = 1
+            GROUP BY parent_id
+        ) ch ON ch.parent_id = a.id
+        WHERE a.is_active = 1
+        ORDER BY a.account_code
+    `).all(start, end, start, end).map((row) => ({
+        ...row,
+        balance: row.normal_balance === 'debit'
+            ? Number(row.total_debit || 0) - Number(row.total_credit || 0)
+            : Number(row.total_credit || 0) - Number(row.total_debit || 0),
+    }));
 });
 
 
@@ -1618,48 +2088,191 @@ ipcMain.handle('db:get-dashboard-stats', () => {
 ipcMain.handle('db:get-fund-summary', (_e, { startDate, endDate } = {}) => {
   const db = getDb();
 
-  const params = [];
-  let dateFilter = '';
-  if (startDate) { dateFilter += ' AND b.bill_date >= ?'; params.push(startDate + '-01'); }
-  if (endDate)   { dateFilter += ' AND b.bill_date <= ?'; params.push(endDate   + '-31'); }
+    const normalizeChargeSql = `
+        CASE
+            WHEN lower(trim(bi.charge_name)) IN ('aquifer charges', 'aquifer contribution', 'contribution for aquifer if water connection is provided') THEN 'Aquifer Contribution'
+            WHEN lower(trim(bi.charge_name)) IN ('garbage charges', 'garbage collection', 'contribution for garbage collection if upper stories are used for residential purpose') THEN 'Garbage Collection'
+            WHEN lower(trim(bi.charge_name)) IN ('mosque fund', 'mosque contribution', 'contribution for mosque') THEN 'Mosque Contribution'
+            WHEN lower(trim(bi.charge_name)) IN (
+                'base contribution',
+                'contribution for commercial property',
+                'contribution for commercial property - rs. 1500/- per month for vacant and single story',
+                'per extra floor',
+                'contribution for each constructed story other than ground floor'
+            ) THEN 'Commercial Contribution'
+            WHEN lower(trim(bi.charge_name)) = 'transfer contribution from buyer' THEN 'Transfer Contribution from buyer'
+            ELSE trim(bi.charge_name)
+        END
+    `;
 
-  return db.prepare(`
-    SELECT
-      bi.charge_name,
-      b.bill_type,
-      COUNT(DISTINCT b.id) AS payment_count,
-      -- Collected: proportional share of amount_paid using item_totals as divisor
-      COALESCE(SUM(
-                CASE WHEN item_totals.items_sum > 0
-                    THEN b.amount_paid * (bi.amount / item_totals.items_sum)
-                    ELSE b.amount_paid
+    const sectionSql = `
+        CASE
+            WHEN b.bill_type IN ('monthly', 'tenant') THEN 'monthly'
+            WHEN b.bill_type = 'special' AND b.billing_month IS NOT NULL THEN 'monthly'
+            ELSE 'special'
+        END
+    `;
+
+    const billDateFilter = [];
+    const billDateParams = [];
+    if (startDate) { billDateFilter.push('b.bill_date >= ?'); billDateParams.push(startDate + '-01'); }
+    if (endDate) {
+        billDateFilter.push("b.bill_date <= date(? || '-01', 'start of month', '+1 month', '-1 day')");
+        billDateParams.push(endDate);
+    }
+    const whereBillDate = billDateFilter.length > 0 ? ` AND ${billDateFilter.join(' AND ')}` : '';
+
+    const payDateFilter = [];
+    const payDateParams = [];
+    if (startDate) { payDateFilter.push('p.payment_date >= ?'); payDateParams.push(startDate + '-01'); }
+    if (endDate) {
+        payDateFilter.push("p.payment_date <= date(? || '-01', 'start of month', '+1 month', '-1 day')");
+        payDateParams.push(endDate);
+    }
+    const wherePayDate = payDateFilter.length > 0 ? ` AND ${payDateFilter.join(' AND ')}` : '';
+
+    const outstandingRows = db.prepare(`
+        WITH base_items AS (
+            SELECT
+                b.id AS bill_id,
+                ${sectionSql} AS section,
+                ${normalizeChargeSql} AS charge_name,
+                bi.amount AS amount,
+                b.balance_due
+            FROM bills b
+            JOIN bill_items bi ON bi.bill_id = b.id
+            WHERE b.is_deleted = 0
+                AND bi.charge_name NOT LIKE '%Arrears%'
+                AND bi.charge_name NOT LIKE '%Late Fee%'
+                ${whereBillDate}
+        ),
+        item_totals AS (
+            SELECT bill_id, SUM(amount) AS items_sum
+            FROM base_items
+            GROUP BY bill_id
+        )
+        SELECT
+            bi.section,
+            bi.charge_name,
+            COALESCE(SUM(
+                CASE
+                    WHEN it.items_sum > 0 THEN bi.balance_due * (bi.amount / it.items_sum)
+                    ELSE 0
                 END
-      ), 0) AS total_collected,
-      -- Billed: raw bill_items amount
-      COALESCE(SUM(bi.amount), 0) AS total_billed,
-      -- Outstanding: proportional share of balance_due
-      COALESCE(SUM(
-                CASE WHEN item_totals.items_sum > 0
-                    THEN b.balance_due * (bi.amount / item_totals.items_sum)
-                    ELSE b.balance_due
+            ), 0) AS total_outstanding
+        FROM base_items bi
+        JOIN item_totals it ON it.bill_id = bi.bill_id
+        GROUP BY bi.section, bi.charge_name
+    `).all(...billDateParams);
+
+    const collectedAllocRows = db.prepare(`
+        WITH base_items AS (
+            SELECT
+                b.id AS bill_id,
+                ${sectionSql} AS section,
+                ${normalizeChargeSql} AS charge_name,
+                bi.amount AS amount
+            FROM bills b
+            JOIN bill_items bi ON bi.bill_id = b.id
+            WHERE b.is_deleted = 0
+                AND bi.charge_name NOT LIKE '%Arrears%'
+                AND bi.charge_name NOT LIKE '%Late Fee%'
+        ),
+        item_totals AS (
+            SELECT bill_id, SUM(amount) AS items_sum
+            FROM base_items
+            GROUP BY bill_id
+        )
+        SELECT
+            bi.section,
+            bi.charge_name,
+            COALESCE(SUM(
+                CASE
+                    WHEN it.items_sum > 0 THEN pa.amount_applied * (bi.amount / it.items_sum)
+                    ELSE 0
                 END
-      ), 0) AS total_outstanding
-    FROM bills b
-    JOIN bill_items bi ON bi.bill_id = b.id
-      AND bi.charge_name NOT LIKE '%Arrears%'
-      AND bi.charge_name NOT LIKE '%Late Fee%'
-    JOIN (
-      SELECT bill_id, SUM(amount) AS items_sum
-      FROM bill_items
-      WHERE charge_name NOT LIKE '%Arrears%'
-        AND charge_name NOT LIKE '%Late Fee%'
-      GROUP BY bill_id
-    ) item_totals ON item_totals.bill_id = b.id
-    WHERE b.is_deleted = 0
-      ${dateFilter}
-    GROUP BY bi.charge_name, b.bill_type
-    ORDER BY b.bill_type ASC, total_collected DESC
-  `).all(...params);
+            ), 0) AS total_collected
+        FROM payment_allocations pa
+        JOIN payments p ON p.id = pa.payment_id
+        JOIN base_items bi ON bi.bill_id = pa.bill_id
+        JOIN item_totals it ON it.bill_id = bi.bill_id
+        WHERE 1=1 ${wherePayDate}
+        GROUP BY bi.section, bi.charge_name
+    `).all(...payDateParams);
+
+    const collectedDirectRows = db.prepare(`
+        WITH base_items AS (
+            SELECT
+                b.id AS bill_id,
+                ${sectionSql} AS section,
+                ${normalizeChargeSql} AS charge_name,
+                bi.amount AS amount
+            FROM bills b
+            JOIN bill_items bi ON bi.bill_id = b.id
+            WHERE b.is_deleted = 0
+                AND bi.charge_name NOT LIKE '%Arrears%'
+                AND bi.charge_name NOT LIKE '%Late Fee%'
+        ),
+        item_totals AS (
+            SELECT bill_id, SUM(amount) AS items_sum
+            FROM base_items
+            GROUP BY bill_id
+        )
+        SELECT
+            bi.section,
+            bi.charge_name,
+            COALESCE(SUM(
+                CASE
+                    WHEN it.items_sum > 0 THEN p.amount * (bi.amount / it.items_sum)
+                    ELSE 0
+                END
+            ), 0) AS total_collected
+        FROM payments p
+        LEFT JOIN payment_allocations pa ON pa.payment_id = p.id
+        JOIN base_items bi ON bi.bill_id = p.bill_id
+        JOIN item_totals it ON it.bill_id = bi.bill_id
+        WHERE pa.id IS NULL ${wherePayDate}
+        GROUP BY bi.section, bi.charge_name
+    `).all(...payDateParams);
+
+    const merged = new Map();
+    const ensure = (section, charge_name) => {
+        const key = `${section}::${charge_name}`;
+        if (!merged.has(key)) {
+            merged.set(key, {
+                section,
+                charge_name,
+                total_collected: 0,
+                total_outstanding: 0,
+            });
+        }
+        return merged.get(key);
+    };
+
+    for (const row of outstandingRows) {
+        const r = ensure(row.section, row.charge_name);
+        r.total_outstanding += Number(row.total_outstanding || 0);
+    }
+    for (const row of collectedAllocRows) {
+        const r = ensure(row.section, row.charge_name);
+        r.total_collected += Number(row.total_collected || 0);
+    }
+    for (const row of collectedDirectRows) {
+        const r = ensure(row.section, row.charge_name);
+        r.total_collected += Number(row.total_collected || 0);
+    }
+
+    return [...merged.values()]
+        .map((r) => ({
+            ...r,
+            total_collected: Math.round(r.total_collected * 100) / 100,
+            total_outstanding: Math.round(r.total_outstanding * 100) / 100,
+        }))
+        .sort((a, b) => {
+            if (a.section !== b.section) return a.section.localeCompare(b.section);
+            if (b.total_collected !== a.total_collected) return b.total_collected - a.total_collected;
+            return a.charge_name.localeCompare(b.charge_name);
+        });
 });
 
 // ── Reports ───────────────────────────────────────────────────
@@ -2113,6 +2726,7 @@ ipcMain.handle('db:get-tenant-statement', (_e, tenantId) => {
     if (!tenant) return null;
     const bills = db.prepare(`
         SELECT b.*,
+               COALESCE((SELECT SUM(a.amount) FROM adjustments a WHERE a.bill_id = b.id), 0) as adjustment_total,
                (SELECT GROUP_CONCAT(bi.charge_name || ' (Rs.' || bi.amount || ')', ', ')
                 FROM bill_items bi WHERE bi.bill_id = b.id) as charge_names
         FROM bills b
@@ -2129,8 +2743,8 @@ ipcMain.handle('db:get-tenant-statement', (_e, tenantId) => {
     const summary = {
         totalBilled: bills.reduce((s, b) => s + (b.total_amount || 0), 0),
         totalPaid: bills.reduce((s, b) => s + (b.amount_paid || 0), 0),
-        totalOutstanding: bills.reduce((s, b) => s + (b.balance_due || 0), 0),
-        unpaidCount: bills.filter(b => b.status !== 'paid').length,
+        totalOutstanding: bills.reduce((s, b) => s + (['unpaid', 'partial', 'overdue'].includes(b.status) ? (b.balance_due || 0) : 0), 0),
+        unpaidCount: bills.filter(b => ['unpaid', 'partial', 'overdue'].includes(b.status)).length,
         monthlyCount: bills.filter(b => b.bill_type === 'monthly' || b.bill_type === 'tenant').length,
     };
     return { tenant, bills, payments, summary };
@@ -2296,6 +2910,46 @@ ipcMain.handle('db:get-bank-balance', () => {
     return r?.balance || 0;
 });
 
+ipcMain.handle('db:get-cash-bank-transfers', (_e, { startDate, endDate } = {}) => {
+    const db = getDb();
+    const from = startDate || '1900-01-01';
+    const to = endDate || '2999-12-31';
+
+    return db.prepare(`
+        SELECT
+            ce.id,
+            ce.entry_date,
+            ce.description,
+            ce.cash_in,
+            ce.bank_in,
+            ce.cash_out,
+            ce.bank_out,
+            CASE
+                WHEN ce.cash_out > 0 AND ce.bank_in > 0 THEN 'cash_to_bank'
+                WHEN ce.cash_in > 0 AND ce.bank_out > 0 THEN 'bank_to_cash'
+                ELSE 'transfer'
+            END AS transfer_type,
+            CASE
+                WHEN ce.cash_out > 0 AND ce.bank_in > 0 THEN ce.bank_in
+                WHEN ce.cash_in > 0 AND ce.bank_out > 0 THEN ce.cash_in
+                ELSE 0
+            END AS amount,
+            COALESCE(b.bank_name, '') AS bank_name
+        FROM cashbook_entries ce
+        LEFT JOIN journal_lines jl ON jl.journal_entry_id = ce.journal_entry_id AND jl.debit > 0
+        LEFT JOIN accounts a ON a.id = jl.account_id
+        LEFT JOIN banks b ON b.account_id = a.id
+        WHERE (
+            (ce.cash_out > 0 AND ce.bank_in > 0)
+            OR (ce.cash_in > 0 AND ce.bank_out > 0)
+        )
+            AND ce.entry_date >= ?
+            AND ce.entry_date <= ?
+        ORDER BY ce.entry_date DESC, ce.id DESC
+        LIMIT 500
+    `).all(from, to);
+});
+
 // ── Banks Management ─────────────────────────────────────────────
 ipcMain.handle('db:get-banks', () => {
     return getDb().prepare(`
@@ -2318,7 +2972,8 @@ ipcMain.handle('db:get-all-banks', () => {
 
 ipcMain.handle('db:add-bank', (_e, { bankName, accountNumber, branchName, branchCode, iban }) => {
     const db = getDb();
-    if (!bankName || !bankName.trim()) throw new Error('Bank name is required');
+    const normalizedBankName = String(bankName || '').trim();
+    if (!normalizedBankName) throw new Error('Bank name is required');
 
     return db.transaction(() => {
         // Generate next account code for bank (1001, 1002, 1003...)
@@ -2336,14 +2991,14 @@ ipcMain.handle('db:add-bank', (_e, { bankName, accountNumber, branchName, branch
         const accountResult = db.prepare(`
             INSERT INTO accounts (account_code, account_name, account_type, normal_balance)
             VALUES (?, ?, 'asset', 'debit')
-        `).run(nextCode, bankName.trim());
+        `).run(nextCode, normalizedBankName);
 
         // Create bank entry linked to the account
         const bankResult = db.prepare(`
             INSERT INTO banks (bank_name, account_number, branch_name, branch_code, iban, account_id, is_active, is_default)
             VALUES (?, ?, ?, ?, ?, ?, 1, 0)
         `).run(
-            bankName.trim(),
+            normalizedBankName,
             accountNumber || null,
             branchName || null,
             branchCode || null,
@@ -2351,11 +3006,19 @@ ipcMain.handle('db:add-bank', (_e, { bankName, accountNumber, branchName, branch
             accountResult.lastInsertRowid
         );
 
+        const createdBank = db.prepare(`
+            SELECT b.*, a.account_code, a.account_name as linked_account_name
+            FROM banks b
+            LEFT JOIN accounts a ON b.account_id = a.id
+            WHERE b.id = ?
+        `).get(bankResult.lastInsertRowid);
+
         return { 
             success: true, 
             bankId: bankResult.lastInsertRowid,
             accountId: accountResult.lastInsertRowid,
-            accountCode: nextCode
+            accountCode: nextCode,
+            bank: createdBank,
         };
     })();
 });
@@ -2432,32 +3095,38 @@ ipcMain.handle('db:set-default-bank', (_e, { id }) => {
 ipcMain.handle('db:cash-to-bank', (_e, { date, amount, notes, bankId }) => {
     const db = getDb();
     const cash = db.prepare("SELECT id FROM accounts WHERE account_code = '1000'").get();
-    
-    // Get bank account - either by bankId or default
-    let bank;
+
+    // Resolve bank from explicit selection first, then default active bank, then legacy account 1001 fallback.
+    let bankRow = null;
     if (bankId) {
-        const bankRecord = db.prepare('SELECT account_id FROM banks WHERE id = ?').get(bankId);
-        if (bankRecord && bankRecord.account_id) {
-            bank = db.prepare('SELECT id FROM accounts WHERE id = ?').get(bankRecord.account_id);
-        }
+        bankRow = db.prepare(`
+            SELECT b.id, b.bank_name, b.account_id
+            FROM banks b
+            WHERE b.id = ? AND b.is_active = 1
+        `).get(bankId);
+        if (!bankRow) throw new Error('Selected bank not found or inactive');
+    }
+    if (!bankRow) {
+        bankRow = db.prepare(`
+            SELECT b.id, b.bank_name, b.account_id
+            FROM banks b
+            WHERE b.is_active = 1
+            ORDER BY b.is_default DESC, b.id ASC
+            LIMIT 1
+        `).get();
+    }
+
+    let bank = null;
+    let bankName = 'Bank';
+    if (bankRow?.account_id) {
+        bank = db.prepare('SELECT id FROM accounts WHERE id = ?').get(bankRow.account_id);
+        bankName = bankRow.bank_name || bankName;
     }
     if (!bank) {
-        // Fallback to default bank or 1001
-        const defaultBank = db.prepare('SELECT account_id FROM banks WHERE is_default = 1').get();
-        if (defaultBank && defaultBank.account_id) {
-            bank = db.prepare('SELECT id FROM accounts WHERE id = ?').get(defaultBank.account_id);
-        } else {
-            bank = db.prepare("SELECT id FROM accounts WHERE account_code = '1001'").get();
-        }
+        bank = db.prepare("SELECT id FROM accounts WHERE account_code = '1001'").get();
     }
-    
+
     if (!cash || !bank) throw new Error('Accounts not found');
-    
-    // Get bank name for description
-    const bankInfo = bankId 
-        ? db.prepare('SELECT bank_name FROM banks WHERE id = ?').get(bankId)
-        : db.prepare('SELECT bank_name FROM banks WHERE is_default = 1').get();
-    const bankName = bankInfo?.bank_name || 'Bank';
     
     return db.transaction(() => {
         const description = notes || `Cash transferred to ${bankName}`;
@@ -2466,6 +3135,10 @@ ipcMain.handle('db:cash-to-bank', (_e, { date, amount, notes, bankId }) => {
         const jeId = je.lastInsertRowid;
         db.prepare('INSERT INTO journal_lines (journal_entry_id, account_id, debit, credit) VALUES (?, ?, ?, 0)').run(jeId, bank.id, amount);
         db.prepare('INSERT INTO journal_lines (journal_entry_id, account_id, debit, credit) VALUES (?, ?, 0, ?)').run(jeId, cash.id, amount);
+        db.prepare("INSERT INTO ledger_entries (entry_date, description, reference_type, debit_account_id, amount, journal_entry_id) VALUES (?, ?, 'transfer', ?, ?, ?)")
+            .run(date, description, bank.id, amount, jeId);
+        db.prepare("INSERT INTO ledger_entries (entry_date, description, reference_type, credit_account_id, amount, journal_entry_id) VALUES (?, ?, 'transfer', ?, ?, ?)")
+            .run(date, description, cash.id, amount, jeId);
         db.prepare('INSERT INTO cashbook_entries (entry_date, description, cash_out, bank_in, cash_in, bank_out, journal_entry_id) VALUES (?, ?, ?, ?, 0, 0, ?)')
             .run(date, description, amount, amount, jeId);
         return { success: true };
@@ -2475,31 +3148,37 @@ ipcMain.handle('db:cash-to-bank', (_e, { date, amount, notes, bankId }) => {
 ipcMain.handle('db:bank-to-cash', (_e, { date, amount, purpose, transferMode, chequeNo, notes, bankId }) => {
     const db = getDb();
     const cash = db.prepare("SELECT id FROM accounts WHERE account_code = '1000'").get();
-    
-    // Get bank account - either by bankId or default
-    let bank;
+
+    let bankRow = null;
     if (bankId) {
-        const bankRecord = db.prepare('SELECT account_id FROM banks WHERE id = ?').get(bankId);
-        if (bankRecord && bankRecord.account_id) {
-            bank = db.prepare('SELECT id FROM accounts WHERE id = ?').get(bankRecord.account_id);
-        }
+        bankRow = db.prepare(`
+            SELECT b.id, b.bank_name, b.account_id
+            FROM banks b
+            WHERE b.id = ? AND b.is_active = 1
+        `).get(bankId);
+        if (!bankRow) throw new Error('Selected bank not found or inactive');
+    }
+    if (!bankRow) {
+        bankRow = db.prepare(`
+            SELECT b.id, b.bank_name, b.account_id
+            FROM banks b
+            WHERE b.is_active = 1
+            ORDER BY b.is_default DESC, b.id ASC
+            LIMIT 1
+        `).get();
+    }
+
+    let bank = null;
+    let bankName = 'Bank';
+    if (bankRow?.account_id) {
+        bank = db.prepare('SELECT id FROM accounts WHERE id = ?').get(bankRow.account_id);
+        bankName = bankRow.bank_name || bankName;
     }
     if (!bank) {
-        const defaultBank = db.prepare('SELECT account_id FROM banks WHERE is_default = 1').get();
-        if (defaultBank && defaultBank.account_id) {
-            bank = db.prepare('SELECT id FROM accounts WHERE id = ?').get(defaultBank.account_id);
-        } else {
-            bank = db.prepare("SELECT id FROM accounts WHERE account_code = '1001'").get();
-        }
+        bank = db.prepare("SELECT id FROM accounts WHERE account_code = '1001'").get();
     }
-    
-    if (!cash || !bank) throw new Error('Accounts not found');
 
-    // Get bank name for description
-    const bankInfo = bankId 
-        ? db.prepare('SELECT bank_name FROM banks WHERE id = ?').get(bankId)
-        : db.prepare('SELECT bank_name FROM banks WHERE is_default = 1').get();
-    const bankName = bankInfo?.bank_name || 'Bank';
+    if (!cash || !bank) throw new Error('Accounts not found');
 
     const mode = transferMode === 'online' ? 'online' : 'cheque';
     const instrument = mode === 'cheque' ? `Cheque #${(chequeNo || '').trim()}` : 'Online transaction';
@@ -2519,6 +3198,10 @@ ipcMain.handle('db:bank-to-cash', (_e, { date, amount, purpose, transferMode, ch
         // Opposite of cash-to-bank: Dr Cash / Cr Bank
         db.prepare('INSERT INTO journal_lines (journal_entry_id, account_id, debit, credit) VALUES (?, ?, ?, 0)').run(jeId, cash.id, amount);
         db.prepare('INSERT INTO journal_lines (journal_entry_id, account_id, debit, credit) VALUES (?, ?, 0, ?)').run(jeId, bank.id, amount);
+        db.prepare("INSERT INTO ledger_entries (entry_date, description, reference_type, debit_account_id, amount, journal_entry_id) VALUES (?, ?, 'transfer', ?, ?, ?)")
+            .run(date, description, cash.id, amount, jeId);
+        db.prepare("INSERT INTO ledger_entries (entry_date, description, reference_type, credit_account_id, amount, journal_entry_id) VALUES (?, ?, 'transfer', ?, ?, ?)")
+            .run(date, description, bank.id, amount, jeId);
 
         db.prepare('INSERT INTO cashbook_entries (entry_date, description, cash_in, bank_out, cash_out, bank_in, journal_entry_id) VALUES (?, ?, ?, ?, 0, 0, ?)')
             .run(date, description, amount, amount, jeId);
