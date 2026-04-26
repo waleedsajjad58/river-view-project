@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { app, BrowserWindow } from 'electron';
 import { getDb } from './database.js';
@@ -136,6 +136,55 @@ function getLogoDataURI() {
     return ''; // Return empty string if not found, template will show fallback
 }
 
+  function createHiddenWindow() {
+    const win = new BrowserWindow({
+      width: 900,
+      height: 1100,
+      show: false,
+      autoHideMenuBar: true,
+      webPreferences: { nodeIntegration: false, contextIsolation: true }
+    });
+
+    activePrintWindows.add(win);
+
+    win.webContents.on('crashed', () => {
+      console.error('[challanExport] WebContents crashed');
+      activePrintWindows.delete(win);
+      if (!win.isDestroyed()) win.destroy();
+    });
+
+    win.webContents.on('did-fail-load', (event, errorCode, errorDescription) => {
+      console.error(`[challanExport] Failed to load HTML: ${errorCode} - ${errorDescription}`);
+      activePrintWindows.delete(win);
+      if (!win.isDestroyed()) win.close();
+    });
+
+    win.on('closed', () => {
+      activePrintWindows.delete(win);
+    });
+
+    return win;
+  }
+
+  async function renderHtmlToPdfBuffer(html) {
+    const win = createHiddenWindow();
+    const dataUrl = 'data:text/html;charset=utf-8,' + encodeURIComponent(html);
+
+    await win.loadURL(dataUrl);
+
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const pdfBuffer = await win.webContents.printToPDF({
+      printBackground: true,
+      preferCSSPageSize: true,
+    });
+
+    if (!win.isDestroyed()) {
+      win.close();
+    }
+
+    return Buffer.from(pdfBuffer);
+  }
+
 export function generateChallanHTML(billId, customAmount = null, printRemarks = null) {
     const db = getDb();
 
@@ -257,7 +306,9 @@ export function generateChallanHTML(billId, customAmount = null, printRemarks = 
     };
 
     const groupedItems = Object.values(
-      items.reduce((acc, i) => {
+      items
+      .filter((i) => !/arrears/i.test(String(i.charge_name || '')))
+      .reduce((acc, i) => {
         const label = normalizeChargeLabel(i.charge_name, row, i.amount);
         if (!acc[label]) acc[label] = { label, amount: 0 };
         acc[label].amount += Number(i.amount) || 0;
@@ -270,7 +321,7 @@ export function generateChallanHTML(billId, customAmount = null, printRemarks = 
       return a.label.localeCompare(b.label);
     });
 
-    const showArrearsRow = row.bill_type === 'monthly' && Number(row.arrears || 0) > 0.009;
+    const showArrearsRow = Number(row.arrears || 0) > 0.009;
 
     const descriptionRows = (() => {
       if (row.bill_type === 'tenant') {
@@ -298,7 +349,8 @@ export function generateChallanHTML(billId, customAmount = null, printRemarks = 
         return [
           ...fixedRows,
           ...extraRows,
-        ].join('');
+          showArrearsRow ? rowHtml('Arrears', fmt(row.arrears)) : null,
+        ].filter(Boolean).join('');
       }
 
       return [
@@ -353,74 +405,140 @@ export function generateChallanHTML(billId, customAmount = null, printRemarks = 
         .replace(/\{\{LOGO_DATA_URI\}\}/g,         getLogoDataURI());
 }
 
-export function printChallan(html) {
-    const win = new BrowserWindow({
+    function extractHtmlSection(html, tagName) {
+      const match = String(html || '').match(new RegExp(`<${tagName}[^>]*>([\s\S]*?)<\/${tagName}>`, 'i'));
+      return match ? match[1] : '';
+    }
+
+    function createPrintWindow(html) {
+      const win = new BrowserWindow({
         width: 900,
         height: 1100,
         show: false,
         autoHideMenuBar: true,
         webPreferences: { nodeIntegration: false, contextIsolation: true }
-    });
-    
-    // Keep window alive to prevent Garbage Collection
-    activePrintWindows.add(win);
-    
-    // Error handler
-    win.webContents.on('crashed', () => {
+      });
+
+      activePrintWindows.add(win);
+
+      win.webContents.on('crashed', () => {
         console.error('[printChallan] WebContents crashed');
         activePrintWindows.delete(win);
         if (!win.isDestroyed()) win.destroy();
-    });
-    
-    win.webContents.on('did-fail-load', (event, errorCode, errorDescription) => {
+      });
+
+      win.webContents.on('did-fail-load', (event, errorCode, errorDescription) => {
         console.error(`[printChallan] Failed to load HTML: ${errorCode} - ${errorDescription}`);
         activePrintWindows.delete(win);
         if (!win.isDestroyed()) win.close();
-    });
-    
-    const dataUrl = 'data:text/html;charset=utf-8,' + encodeURIComponent(html);
-    win.loadURL(dataUrl);
-    
-    win.webContents.on('did-finish-load', () => {
-        // Small delay to ensure rendering is complete
+      });
+
+      const dataUrl = 'data:text/html;charset=utf-8,' + encodeURIComponent(html);
+      win.loadURL(dataUrl);
+
+      win.webContents.on('did-finish-load', () => {
         setTimeout(() => {
-            try {
-          // Do not close early; closing before print/PDF finalization can corrupt output files.
-          const closeSafely = () => {
-            if (!win.isDestroyed()) {
-              win.close();
-            }
-            activePrintWindows.delete(win);
-          };
-
-          win.webContents.print(
-            { silent: false, printBackground: true },
-            (_success, failureReason) => {
-              if (failureReason) {
-                console.error('[printChallan] Print failed:', failureReason);
+          try {
+            const closeSafely = () => {
+              if (!win.isDestroyed()) {
+                win.close();
               }
-              closeSafely();
-            }
-          );
+              activePrintWindows.delete(win);
+            };
 
-          // Fallback in case callback is not triggered on some printers/drivers.
-          setTimeout(() => {
-            if (activePrintWindows.has(win)) {
-              closeSafely();
-            }
-          }, 120000);
-            } catch (err) {
-                console.error('[printChallan] Error during print:', err);
-                activePrintWindows.delete(win);
-                if (!win.isDestroyed()) win.close();
-            }
+            win.webContents.print(
+              { silent: false, printBackground: true },
+              (_success, failureReason) => {
+                if (failureReason) {
+                  console.error('[printChallan] Print failed:', failureReason);
+                }
+                closeSafely();
+              }
+            );
+
+            setTimeout(() => {
+              if (activePrintWindows.has(win)) {
+                closeSafely();
+              }
+            }, 120000);
+          } catch (err) {
+            console.error('[printChallan] Error during print:', err);
+            activePrintWindows.delete(win);
+            if (!win.isDestroyed()) win.close();
+          }
         }, 100);
-    });
-    
-    // Handle window close event
-    win.on('closed', () => {
+      });
+
+      win.on('closed', () => {
         activePrintWindows.delete(win);
-    });
+      });
+    }
+
+    export function generateChallanBatchHTML(billIds) {
+      const ids = Array.isArray(billIds) ? billIds.map((id) => Number(id)).filter(Number.isFinite) : [];
+      if (ids.length === 0) throw new Error('No challans found for the selected month');
+
+      const docs = ids.map((billId) => generateChallanHTML(billId));
+      const firstDoc = docs[0] || '';
+      const head = extractHtmlSection(firstDoc, 'head');
+      const bodies = docs.map((doc) => `<section class="batch-challan">${extractHtmlSection(doc, 'body')}</section>`).join('\n<div class="batch-break"></div>\n');
+
+      return `<!DOCTYPE html>
+    <html lang="en">
+    <head>
+    ${head}
+    <style>
+      .batch-challan { page-break-after: always; }
+      .batch-challan:last-child { page-break-after: auto; }
+      .batch-break { display: none; }
+    </style>
+    </head>
+    <body style="margin:0;padding:0;background:#fff;">
+    ${bodies}
+    </body>
+    </html>`;
+    }
+
+export function printChallan(html) {
+      createPrintWindow(html);
+    }
+
+    export function printChallanBatch(html) {
+      createPrintWindow(html);
+}
+
+export async function exportChallansAsPdfFiles({ billIds, outputDir }) {
+  const ids = Array.isArray(billIds) ? billIds.map((id) => Number(id)).filter(Number.isFinite) : [];
+  if (!ids.length) throw new Error('No challans found for the selected month');
+  if (!outputDir) throw new Error('Output folder is required');
+
+  const db = getDb();
+  const rows = db.prepare(`
+    SELECT b.id, b.bill_number, b.bill_type, b.billing_month, p.plot_number
+    FROM bills b
+    LEFT JOIN plots p ON p.id = b.plot_id
+    WHERE b.id = ? AND b.is_deleted = 0 AND b.status != 'voided'
+  `);
+
+  const results = [];
+  for (const id of ids) {
+    const bill = rows.get(id);
+    if (!bill) {
+      results.push({ billId: id, skipped: true, reason: 'Bill not found' });
+      continue;
+    }
+
+    const html = generateChallanHTML(id);
+    const pdfBuffer = await renderHtmlToPdfBuffer(html);
+    const safeBillNumber = String(bill.bill_number || `bill-${id}`).replace(/[<>:"/\\|?*]+/g, '_');
+    const safePlotNumber = String(bill.plot_number || 'unassigned-plot').replace(/[<>:"/\\|?*]+/g, '_');
+    const fileName = `${safePlotNumber}__${safeBillNumber}.pdf`;
+    const filePath = join(outputDir, fileName);
+    writeFileSync(filePath, pdfBuffer);
+    results.push({ billId: id, fileName, filePath, skipped: false });
+  }
+
+  return results;
 }
 
 export function generateTransferSlipHTML({ date, amount, notes, direction = 'cash_to_bank', purpose, transferMode, chequeNo }) {

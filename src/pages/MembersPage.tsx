@@ -1,8 +1,44 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { Plus, X, Search, User, Home, FileText, Check, Trash2, Edit2 } from 'lucide-react'
+import { Plus, X, Search, User, Home, FileText, Check, Trash2, Edit2, Download } from 'lucide-react'
+import { exportExcelFile } from '../utils/exportExcel'
 
 const ipc = (window as any).ipcRenderer
 const fmt = (n: number) => `Rs. ${(n || 0).toLocaleString()}`
+
+const CNIC_MAX_LEN = 15 // 35201-1234567-1
+const PHONE_MAX_LEN = 12 // 0300-1234567
+
+function normalizeCnicInput(value: string) {
+    const digits = String(value || '').replace(/\D/g, '').slice(0, 13)
+    const p1 = digits.slice(0, 5)
+    const p2 = digits.slice(5, 12)
+    const p3 = digits.slice(12, 13)
+    if (!p1) return ''
+    if (!p2) return p1
+    if (!p3) return `${p1}-${p2}`
+    return `${p1}-${p2}-${p3}`
+}
+
+function normalizePhoneInput(value: string) {
+    let digits = String(value || '').replace(/\D/g, '')
+    if (digits.startsWith('92') && digits.length >= 12) {
+        digits = `0${digits.slice(2)}`
+    }
+    digits = digits.slice(0, 11)
+    const p1 = digits.slice(0, 4)
+    const p2 = digits.slice(4, 11)
+    if (!p1) return ''
+    if (!p2) return p1
+    return `${p1}-${p2}`
+}
+
+function isValidCnic(value: string) {
+    return String(value || '').replace(/\D/g, '').length === 13
+}
+
+function isValidPhone(value: string) {
+    return String(value || '').replace(/\D/g, '').length === 11
+}
 
 const PLOT_TYPE_LABELS: Record<string, string> = {
     residential_constructed: 'Residential',
@@ -64,8 +100,6 @@ function MemberForm({
     ownedPlotIds?: number[]
 }) {
     const set = (k: string, v: any) => onChange({ ...form, [k]: v })
-    const sanitizeCnic = (v: string) => v.replace(/\D/g, '').slice(0, 13)
-    const sanitizePhone = (v: string) => v.replace(/\D/g, '').slice(0, 11)
     const selectedPlotId = Number(form.assign_plot_id || 0)
     const alreadyOwned = selectedPlotId > 0 && ownedPlotIds.includes(selectedPlotId)
     return (
@@ -94,10 +128,8 @@ function MemberForm({
                 <div className="form-group">
                     <label>CNIC *</label>
                     <input type="text" value={form.cnic}
-                        onChange={e => set('cnic', sanitizeCnic(e.target.value))}
-                        inputMode="numeric"
-                        pattern="[0-9]*"
-                        maxLength={13}
+                        onChange={e => set('cnic', normalizeCnicInput(e.target.value))}
+                        maxLength={CNIC_MAX_LEN}
                         placeholder="35201-1234567-1"
                         style={{ fontFamily: 'IBM Plex Mono', letterSpacing: '0.02em' }}
                     />
@@ -105,10 +137,8 @@ function MemberForm({
                 <div className="form-group">
                     <label>Phone *</label>
                     <input type="text" value={form.phone}
-                        onChange={e => set('phone', sanitizePhone(e.target.value))}
-                        inputMode="numeric"
-                        pattern="[0-9]*"
-                        maxLength={11}
+                        onChange={e => set('phone', normalizePhoneInput(e.target.value))}
+                        maxLength={PHONE_MAX_LEN}
                         placeholder="0300-1234567"
                         style={{ fontFamily: 'IBM Plex Mono' }}
                     />
@@ -506,8 +536,8 @@ function MemberPanel({ member, onClose, onSaved, onDeleted }: {
 
     const handleSave = async () => {
         if (!form.name.trim() || !String(form.member_id || '').trim() || !String(form.cnic || '').trim() || !String(form.phone || '').trim() || !String(form.membership_date || '').trim()) return
-        if (!/^\d{13}$/.test(String(form.cnic || ''))) { setErr('CNIC must be exactly 13 digits'); return }
-        if (!/^\d{11}$/.test(String(form.phone || ''))) { setErr('Phone number must be exactly 11 digits'); return }
+        if (!isValidCnic(form.cnic)) { setErr('CNIC must be exactly 13 digits'); return }
+        if (!isValidPhone(form.phone)) { setErr('Phone number must be exactly 11 digits'); return }
         setSaving(true)
         setErr('')
         try {
@@ -676,8 +706,8 @@ function MemberPanel({ member, onClose, onSaved, onDeleted }: {
                                         saving ||
                                         !form.name.trim() ||
                                         !String(form.member_id || '').trim() ||
-                                        !/^\d{13}$/.test(String(form.cnic || '')) ||
-                                        !/^\d{11}$/.test(String(form.phone || '')) ||
+                                        !isValidCnic(form.cnic) ||
+                                        !isValidPhone(form.phone) ||
                                         !String(form.membership_date || '').trim()
                                     }>
                                     <Check size={14} />
@@ -716,8 +746,8 @@ function AddMemberPanel({ onClose, onSaved }: { onClose: () => void, onSaved: ()
         if (!form.cnic.trim()) { setErr('CNIC is required'); return }
         if (!form.phone.trim()) { setErr('Phone number is required'); return }
         if (!form.membership_date.trim()) { setErr('Membership date is required'); return }
-        if (!/^\d{13}$/.test(form.cnic)) { setErr('CNIC must be exactly 13 digits'); return }
-        if (!/^\d{11}$/.test(form.phone)) { setErr('Phone number must be exactly 11 digits'); return }
+        if (!isValidCnic(form.cnic)) { setErr('CNIC must be exactly 13 digits'); return }
+        if (!isValidPhone(form.phone)) { setErr('Phone number must be exactly 11 digits'); return }
         setSaving(true)
         setErr('')
         try {
@@ -767,8 +797,8 @@ function AddMemberPanel({ onClose, onSaved }: { onClose: () => void, onSaved: ()
                             saving ||
                             !form.name.trim() ||
                             !form.member_id.trim() ||
-                            !/^\d{13}$/.test(form.cnic) ||
-                            !/^\d{11}$/.test(form.phone) ||
+                            !isValidCnic(form.cnic) ||
+                            !isValidPhone(form.phone) ||
                             !form.membership_date.trim()
                         }>
                         <Check size={15} />
@@ -823,6 +853,28 @@ export default function MembersPage() {
     const activeCount = members.filter(m => m.is_member).length
     const inactiveCount = members.filter(m => !m.is_member).length
 
+    const handleExportMembers = async () => {
+        const headers = ['Member ID', 'Name', 'CNIC', 'Phone', 'Status']
+        const rows: (string | number)[][] = members.map(m => [
+            m.member_id || '',
+            m.name || '',
+            m.cnic || '',
+            m.phone || '',
+            m.is_member ? 'Active' : 'Inactive',
+        ])
+
+        await exportExcelFile({
+            fileName: `members-registry-${new Date().toISOString().split('T')[0]}`,
+            sheetName: 'Members',
+            title: 'River View Cooperative Housing Society Ltd.',
+            subtitle: 'Members Registry',
+            meta: [`Generated: ${new Date().toLocaleDateString('en-PK')} | Total Members: ${members.length} | Active: ${activeCount} | Inactive: ${inactiveCount}`],
+            headers,
+            rows,
+            numericColumns: [1],
+        })
+    }
+
     return (
         <div className="page">
             {/* ── Header ── */}
@@ -835,10 +887,17 @@ export default function MembersPage() {
                         {' · '}{members.length} total
                     </p>
                 </div>
-                <button className="btn btn-primary"
-                    onClick={() => setShowAdd(true)}>
-                    <Plus size={15} /> Add Member
-                </button>
+                <div style={{ display: 'flex', gap: 8 }}>
+                    <button className="btn btn-ghost"
+                        onClick={handleExportMembers}
+                        title="Export to Excel">
+                        <Download size={15} /> Export
+                    </button>
+                    <button className="btn btn-primary"
+                        onClick={() => setShowAdd(true)}>
+                        <Plus size={15} /> Add Member
+                    </button>
+                </div>
             </div>
 
             {msg && (

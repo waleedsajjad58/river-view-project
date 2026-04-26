@@ -9,6 +9,7 @@ function printJournalEntries(entries: any[], startDate: string, endDate: string)
     const refLabel: Record<string, string> = {
         payment: 'Payment', expenditure: 'Expenditure',
         expenditure_reversal: 'Reversal', manual: 'Manual', bank_deposit: 'Bank Deposit',
+        bill_void: 'Bill Void',
     }
     let rows = ''
     let grandDr = 0, grandCr = 0
@@ -101,6 +102,7 @@ async function exportJournalExcel(entries: any[], startDate: string, endDate: st
     const refLabel: Record<string, string> = {
         payment: 'Payment', expenditure: 'Expenditure',
         expenditure_reversal: 'Reversal', manual: 'Manual', bank_deposit: 'Bank Deposit',
+        bill_void: 'Bill Void',
     }
 
     const rows: (string | number)[][] = []
@@ -180,6 +182,7 @@ export default function JournalEntriesPage() {
         expenditure:          'Expenditure',
         expenditure_reversal: 'Reversal',
         manual:               'Manual',
+        bill_void:            'Bill Void',
     }
 
     const refColour: Record<string, string> = {
@@ -187,6 +190,7 @@ export default function JournalEntriesPage() {
         expenditure:          '#b45309',
         expenditure_reversal: '#b91c1c',
         manual:               '#7c3aed',
+        bill_void:            '#475569',
     }
 
     const q = search.toLowerCase()

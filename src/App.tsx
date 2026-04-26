@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { Routes, Route, NavLink, useLocation } from 'react-router-dom'
+import { Suspense, lazy, useEffect, useState } from 'react'
+import { Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom'
 import {
   LayoutDashboard, CreditCard, BookOpen, Settings,
   ChevronLeft, ChevronRight, BarChart3,
@@ -7,19 +7,20 @@ import {
 } from 'lucide-react'
 
 import LoginPage from './pages/LoginPage'
-import DashboardPage from './pages/DashboardPage'
-import ImportPage from './pages/ImportPage'
-import BillingPage from './pages/BillingPage'
-import ExpenditurePage from './pages/ExpenditurePage'
-import CashBookPage from './pages/CashBookPage'
-import CashToBankPage from './pages/CashToBankPage'
-import AccountLedgerPage from './pages/AccountLedgerPage'
-import JournalEntriesPage from './pages/JournalEntriesPage'
-import ReportsPage from './pages/ReportsPage'
-import PlotsPage from './pages/PlotsPage'
-import MembersPage from './pages/MembersPage'
-import TenantsPage from './pages/TenantsPage'
-import SettingsPage from './pages/SettingsPage'
+
+const DashboardPage = lazy(() => import('./pages/DashboardPage'))
+const ImportPage = lazy(() => import('./pages/ImportPage'))
+const BillingPage = lazy(() => import('./pages/BillingPage'))
+const ExpenditurePage = lazy(() => import('./pages/ExpenditurePage'))
+const CashBookPage = lazy(() => import('./pages/CashBookPage'))
+const CashToBankPage = lazy(() => import('./pages/CashToBankPage'))
+const AccountLedgerPage = lazy(() => import('./pages/AccountLedgerPage'))
+const JournalEntriesPage = lazy(() => import('./pages/JournalEntriesPage'))
+const ReportsPage = lazy(() => import('./pages/ReportsPage'))
+const PlotsPage = lazy(() => import('./pages/PlotsPage'))
+const MembersPage = lazy(() => import('./pages/MembersPage'))
+const TenantsPage = lazy(() => import('./pages/TenantsPage'))
+const SettingsPage = lazy(() => import('./pages/SettingsPage'))
 
 function NavLabel({ label, collapsed }: { label: string; collapsed: boolean }) {
   if (collapsed) return <div style={{ height: '0.75rem' }} />
@@ -28,6 +29,7 @@ function NavLabel({ label, collapsed }: { label: string; collapsed: boolean }) {
 
 export default function App() {
   const ipc = (window as any).ipcRenderer
+  const showImportDataNav = false
   const [user, setUser] = useState<any>(null)
   const [collapsed, setCollapsed] = useState(false)
   const [zoomLevel, setZoomLevel] = useState<number>(() => {
@@ -137,19 +139,15 @@ export default function App() {
           <NavLink to="/settings" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
             <Settings size={16} />{!collapsed && <span>Settings</span>}
           </NavLink>
-          <NavLink to="/import" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
-            <FileUp size={16} />{!collapsed && <span>Import Data</span>}
-          </NavLink>
+          {showImportDataNav && (
+            <NavLink to="/import" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
+              <FileUp size={16} />{!collapsed && <span>Import Data</span>}
+            </NavLink>
+          )}
 
         </nav>
 
         <div className="sidebar-footer">
-          <div className="footer-shortcuts">
-            <NavLink to="/settings" className={({ isActive }) => `nav-item footer-link ${isActive ? 'active' : ''}`}>
-              <Settings size={16} />{!collapsed && <span>Settings</span>}
-            </NavLink>
-          </div>
-
           <div className="zoom-controls">
             {!collapsed && <span className="zoom-label">Zoom {zoomLevel}%</span>}
             <div className="zoom-actions">
@@ -175,23 +173,37 @@ export default function App() {
 
       </aside>
 
+      {collapsed && (
+        <button
+          className="sidebar-reopen-btn"
+          onClick={() => setCollapsed(false)}
+          title="Open sidebar"
+          aria-label="Open sidebar"
+        >
+          <ChevronRight size={16} />
+        </button>
+      )}
+
       <main className="main-content">
-        <Routes>
-          <Route path="/" element={<DashboardPage user={user} />} />
-          <Route path="/billing" element={<BillingPage />} />
-          <Route path="/billing/*" element={<BillingPage />} />
-          <Route path="/expenditures" element={<ExpenditurePage />} />
-          <Route path="/cashbook" element={<CashBookPage />} />
-          <Route path="/cash-to-bank" element={<CashToBankPage />} />
-          <Route path="/ledger" element={<AccountLedgerPage />} />
-          <Route path="/journal" element={<JournalEntriesPage />} />
-          <Route path="/reports" element={<ReportsPage />} />
-          <Route path="/plots" element={<PlotsPage />} />
-          <Route path="/members" element={<MembersPage />} />
-          <Route path="/tenants" element={<TenantsPage />} />
-          <Route path="/settings" element={<SettingsPage />} />
-          <Route path="/import" element={<ImportPage />} />
-        </Routes>
+        <Suspense fallback={<div className="page">Loading...</div>}>
+          <Routes>
+            <Route path="/" element={<DashboardPage user={user} />} />
+            <Route path="/billing" element={<BillingPage />} />
+            <Route path="/billing/*" element={<BillingPage />} />
+            <Route path="/special-bills" element={<Navigate to="/billing?tab=special" replace />} />
+            <Route path="/expenditures" element={<ExpenditurePage />} />
+            <Route path="/cashbook" element={<CashBookPage />} />
+            <Route path="/cash-to-bank" element={<CashToBankPage />} />
+            <Route path="/ledger" element={<AccountLedgerPage />} />
+            <Route path="/journal" element={<JournalEntriesPage />} />
+            <Route path="/reports" element={<ReportsPage />} />
+            <Route path="/plots" element={<PlotsPage />} />
+            <Route path="/members" element={<MembersPage />} />
+            <Route path="/tenants" element={<TenantsPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/import" element={<ImportPage />} />
+          </Routes>
+        </Suspense>
       </main>
     </div>
   )

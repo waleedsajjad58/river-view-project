@@ -1,11 +1,51 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import {
     Plus, X, Search, Home, User, ArrowRightLeft, History,
-    Check, Trash2, Edit2, Printer, CreditCard, RefreshCw, Landmark
+    Check, Trash2, Edit2, Printer, CreditCard, RefreshCw, Landmark, Download
 } from 'lucide-react'
+import { exportExcelFile } from '../utils/exportExcel'
 
 const ipc = (window as any).ipcRenderer
 const fmt = (n: number) => `Rs. ${(n || 0).toLocaleString()}`
+
+// ── CNIC & Phone Constants ─────────────────────────────────────
+const CNIC_MAX_LEN = 15 // 35201-1234567-1
+const PHONE_MAX_LEN = 12 // 0300-1234567
+
+function normalizeCnicInput(value: string) {
+    const digits = String(value || '').replace(/\D/g, '').slice(0, 13)
+    const p1 = digits.slice(0, 5)
+    const p2 = digits.slice(5, 12)
+    const p3 = digits.slice(12, 13)
+    if (!p1) return ''
+    if (!p2) return p1
+    if (!p3) return `${p1}-${p2}`
+    return `${p1}-${p2}-${p3}`
+}
+
+function normalizePhoneInput(value: string) {
+    let digits = String(value || '').replace(/\D/g, '')
+    // Accept +92XXXXXXXXXX and normalize to 03XXXXXXXXX.
+    if (digits.startsWith('92') && digits.length >= 12) {
+        digits = `0${digits.slice(2)}`
+    }
+    digits = digits.slice(0, 11)
+    const p1 = digits.slice(0, 4)
+    const p2 = digits.slice(4, 11)
+    if (!p1) return ''
+    if (!p2) return p1
+    return `${p1}-${p2}`
+}
+
+function isValidCnic(value: string) {
+    const digits = String(value || '').replace(/\D/g, '')
+    return digits.length === 13
+}
+
+function isValidPhone(value: string) {
+    const digits = String(value || '').replace(/\D/g, '')
+    return digits.length === 11
+}
 
 // ── Constants ──────────────────────────────────────────────────
 const PLOT_TYPES = [
@@ -13,7 +53,7 @@ const PLOT_TYPES = [
     { value: 'residential_vacant', label: 'Residential (Vacant)' },
     { value: 'commercial', label: 'Commercial' },
 ]
-const MARLA_SIZES = ['5 Marla', '10 Marla', '1 Kanal']
+const MARLA_SIZES = ['5 Marla', '8 Marlai', '10 Marla', '1 Kanal', '2 Kanal']
 const TYPE_BADGE: Record<string, string> = {
     residential_constructed: 'badge-blue',
     residential_vacant: 'badge-purple',
@@ -910,7 +950,7 @@ function TenantsTab({ plot, onMsg }: { plot: any, onMsg: (m: string) => void }) 
         setEditId(t.id); setShowForm(true)
     }
     const handleSave = async () => {
-        if (!form.tenant_id.trim() || !form.name.trim() || !form.cnic.trim() || !form.phone.trim() || !form.start_date) return
+        if (!form.tenant_id.trim() || !form.name.trim() || !isValidCnic(form.cnic) || !isValidPhone(form.phone) || !form.start_date) return
         if (editId) {
             await ipc.invoke('db:update-tenant', { ...form, id: editId, monthly_rent: parseFloat(form.monthly_rent) || 0 })
         } else {
@@ -1035,13 +1075,17 @@ function TenantsTab({ plot, onMsg }: { plot: any, onMsg: (m: string) => void }) 
                         <div className="form-group">
                             <label>CNIC *</label>
                             <input type="text" value={form.cnic}
-                                onChange={e => setForm({ ...form, cnic: e.target.value })}
-                                style={{ fontFamily: 'IBM Plex Mono' }} />
+                                onChange={e => setForm({ ...form, cnic: normalizeCnicInput(e.target.value) })}
+                                maxLength={CNIC_MAX_LEN}
+                                placeholder="35201-1234567-1"
+                                style={{ fontFamily: 'IBM Plex Mono', letterSpacing: '0.02em' }} />
                         </div>
                         <div className="form-group">
                             <label>Phone *</label>
                             <input type="text" value={form.phone}
-                                onChange={e => setForm({ ...form, phone: e.target.value })}
+                                onChange={e => setForm({ ...form, phone: normalizePhoneInput(e.target.value) })}
+                                maxLength={PHONE_MAX_LEN}
+                                placeholder="0300-1234567"
                                 style={{ fontFamily: 'IBM Plex Mono' }} />
                         </div>
                         <div className="form-group">
@@ -1078,7 +1122,7 @@ function TenantsTab({ plot, onMsg }: { plot: any, onMsg: (m: string) => void }) 
                         </div>
                         <div style={{ display: 'flex', gap: 8 }}>
                             <button className="btn btn-ghost btn-sm" onClick={() => setShowForm(false)}>Cancel</button>
-                            <button className="btn btn-primary btn-sm" onClick={handleSave} disabled={!form.tenant_id.trim() || !form.name.trim() || !form.cnic.trim() || !form.phone.trim() || !form.start_date}>
+                            <button className="btn btn-primary btn-sm" onClick={handleSave} disabled={!form.tenant_id.trim() || !form.name.trim() || !isValidCnic(form.cnic) || !isValidPhone(form.phone) || !form.start_date}>
                                 <Check size={12} /> Save
                             </button>
                         </div>
@@ -1391,6 +1435,32 @@ export default function PlotsPage() {
         unassigned: plots.filter(p => !p.owner_name).length,
     }
 
+    const handleExportPlots = async () => {
+        const headers = ['Plot#', 'Area (Marla)', 'Type', 'Floors', 'Owner', 'Status']
+        const rows: (string | number)[][] = plots.map(p => {
+            const plotType = p.plot_type === 'commercial' ? 'Commercial' : p.plot_type === 'residential_constructed' ? 'Constructed' : 'Vacant'
+            return [
+                p.plot_number || '',
+                p.marla_size || '',
+                plotType,
+                p.commercial_floors > 0 ? p.commercial_floors : '',
+                p.owner_name || 'Unassigned',
+                'Active',
+            ]
+        })
+
+        await exportExcelFile({
+            fileName: `plots-registry-${new Date().toISOString().split('T')[0]}`,
+            sheetName: 'Plots',
+            title: 'River View Cooperative Housing Society Ltd.',
+            subtitle: 'Plots Registry',
+            meta: [`Generated: ${new Date().toLocaleDateString('en-PK')} | Total Plots: ${plots.length} | Commercial: ${counts.commercial} | Unassigned: ${counts.unassigned}`],
+            headers,
+            rows,
+            numericColumns: [1, 2, 4],
+        })
+    }
+
     return (
         <div className="page">
             <div className="page-header">
@@ -1411,6 +1481,9 @@ export default function PlotsPage() {
                         <option value="">All Types</option>
                         {PLOT_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
                     </select>
+                    <button className="btn btn-ghost" onClick={handleExportPlots} title="Export to Excel">
+                        <Download size={15} /> Export
+                    </button>
                     <button className="btn btn-primary" onClick={() => setShowAdd(true)}>
                         <Plus size={15} /> Add Plot
                     </button>

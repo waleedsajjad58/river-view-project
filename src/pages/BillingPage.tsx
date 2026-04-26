@@ -3,12 +3,23 @@ import { useSearchParams, useNavigate } from 'react-router-dom'
 import {
   Zap, FileText, Users, Star, CreditCard, Plus, X,
   Search, ChevronDown, ChevronRight, RefreshCw,
-  CheckCircle, AlertCircle, ScrollText, Landmark
+  CheckCircle, AlertCircle, ScrollText, Landmark, Printer
 } from 'lucide-react'
 
 const ipc = (window as any).ipcRenderer
 const fmt = (n: any) => `Rs. ${(Number(n) || 0).toLocaleString()}`
 const currentMonth = () => new Date().toISOString().slice(0, 7)
+const currentDate = () => new Date().toISOString().split('T')[0]
+const isPastMonth = (monthValue: string) => {
+  const month = String(monthValue || '').slice(0, 7)
+  if (!/^\d{4}-\d{2}$/.test(month)) return false
+  return month < currentMonth()
+}
+const isPastDate = (dateValue: string) => {
+  const date = String(dateValue || '').slice(0, 10)
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return false
+  return date < currentDate()
+}
 const MAX_REMARKS_LENGTH = 200
 
 function displayChargeName(rawName: string, billRow?: any, amount?: number) {
@@ -51,6 +62,12 @@ function displayChargeName(rawName: string, billRow?: any, amount?: number) {
   if (lower.includes('garbage')) return 'Garbage Charges(if applicable )'
 
   return original
+}
+
+function displaySpecialChargeLabel(name: string) {
+  return String(name || '').trim() === 'Others'
+    ? 'Other Special Charges Income'
+    : String(name || '')
 }
 
 type MainTab = 'generate' | 'monthly' | 'tenant' | 'special'
@@ -124,9 +141,9 @@ const BILL_TYPE_BADGE: Record<string, { label:string; clr:string }> = {
   tenant:  { label:'Tenant', clr:'#9333ea' },
 }
 
-function BillsTable({ bills, loading, mode, onCollect, onStatement, onPrint }: {
+function BillsTable({ bills, loading, mode, onCollect, onStatement, onPrint, onVoid }: {
   bills:any[]; loading:boolean; mode:'monthly'|'tenant'|'combined';
-  onCollect:(b:any)=>void; onStatement?:(b:any)=>void; onPrint:(b:any)=>void
+  onCollect:(b:any)=>void; onStatement?:(b:any)=>void; onPrint:(b:any)=>void; onVoid?:(b:any)=>void
 }) {
   const colSpan = mode === 'combined' ? 10 : 9
   return (
@@ -177,7 +194,7 @@ function BillsTable({ bills, loading, mode, onCollect, onStatement, onPrint }: {
                 <td>
                   <div style={{ display:'flex', gap:6 }}>
                     {(mode === 'tenant' || isTenantBill) && onStatement && b.tenant_id && (
-                      <button className="btn btn-ghost btn-sm" onClick={() => onStatement(b)} title="View Statement">
+                      <button className="btn btn-ghost btn-sm" onClick={() => onStatement(b)} title="View Statement" style={{ display: 'none' }}>
                         <ScrollText size={13} />
                       </button>
                     )}
@@ -186,7 +203,12 @@ function BillsTable({ bills, loading, mode, onCollect, onStatement, onPrint }: {
                         <CreditCard size={13} /> Collect
                       </button>
                     )}
-                    <button className="btn btn-ghost btn-sm" onClick={() => onPrint(b)} title="Print Challan">🖨</button>
+                    <button className="btn btn-ghost btn-sm" onClick={() => onPrint(b)} title="Print Challan"><Printer size={13} /></button>
+                    {onVoid && b.status !== 'voided' && b.status !== 'paid' && (
+                      <button className="btn btn-ghost btn-sm" onClick={() => onVoid(b)} title="Void Bill" style={{ color:'var(--c-overdue)' }}>
+                        <X size={13} />
+                      </button>
+                    )}
                   </div>
                 </td>
               </tr>
@@ -696,6 +718,7 @@ function NewChargePanel({ plots, onClose, onSaved }: { plots:any[]; onClose:()=>
 
   const handleSave = async () => {
     if (!nbPlot)                              { setError('Select a plot'); return }
+    if (nbDue && isPastDate(nbDue))           { setError('Past due date is not allowed'); return }
     const currentChargeName = nbCharge === 'Others' ? nbCustom.trim() : nbCharge
     const currentAmount = Number(nbAmount || 0)
     const itemsToSave = nbItems.length > 0
@@ -761,7 +784,7 @@ function NewChargePanel({ plots, onClose, onSaved }: { plots:any[]; onClose:()=>
           }}>
             <option value="">Select charge type…</option>
             {charges.map((c: any) => (
-              <option key={c.id} value={c.charge_name}>{c.charge_name}</option>
+              <option key={c.id} value={c.charge_name}>{displaySpecialChargeLabel(c.charge_name)}</option>
             ))}
           </select>
           {loadingCharges && <small style={{ color:'var(--t-faint)' }}>Loading charges…</small>}
@@ -797,7 +820,10 @@ function NewChargePanel({ plots, onClose, onSaved }: { plots:any[]; onClose:()=>
           </div>
           <div className="form-group">
             <label>Due Date <small style={{ color:'var(--t-faint)' }}>(optional)</small></label>
-            <input type="date" value={nbDue} onChange={e => setNbDue(e.target.value)} />
+            <input type="date" value={nbDue} min={currentDate()} onChange={e => setNbDue(e.target.value)} />
+            {nbDue && isPastDate(nbDue) && (
+              <small style={{ color:'var(--c-overdue)', fontWeight:500, marginTop:'0.25rem', display:'block' }}>⚠ Past dates not allowed</small>
+            )}
           </div>
         </div>
         <div style={{ display:'flex', justifyContent:'flex-end', marginBottom:'0.75rem' }}>
@@ -856,14 +882,20 @@ export default function BillingPage() {
   const [genMonth,       setGenMonth]       = useState(currentMonth())
   const [genNotice,      setGenNotice]      = useState('')
   const [isGenerating,   setIsGenerating]   = useState(false)
+  const [isExporting,    setIsExporting]    = useState(false)
   const [genMsg,         setGenMsg]         = useState<{text:string;ok:boolean}|null>(null)
+  const [exportMsg,      setExportMsg]      = useState<{text:string;ok:boolean}|null>(null)
+  const [isSpecialExporting, setIsSpecialExporting] = useState(false)
+  const [specialExportMsg,   setSpecialExportMsg]   = useState<{text:string;ok:boolean}|null>(null)
   const [isApplyingFee,  setIsApplyingFee]  = useState(false)
   const [feeMsg,         setFeeMsg]         = useState<{text:string;ok:boolean}|null>(null)
   const [printMsg,       setPrintMsg]       = useState<{text:string;ok:boolean}|null>(null)
-  const [fixing,         setFixing]         = useState(false)
-  const [fixMsg,         setFixMsg]         = useState<{text:string;ok:boolean}|null>(null)
   const [remarksDialog,  setRemarksDialog]  = useState<{open:boolean;bill:any|null;amount:number|null}>({open:false,bill:null,amount:null})
   const [remarksInput,   setRemarksInput]   = useState('')
+  const [voidDialog,     setVoidDialog]     = useState<{open:boolean;bill:any|null}>({ open:false, bill:null })
+  const [voidReason,     setVoidReason]     = useState('')
+  const [voidLoading,    setVoidLoading]    = useState(false)
+  const [voidMsg,        setVoidMsg]        = useState<{text:string;ok:boolean}|null>(null)
 
   const [monthlyBills,   setMonthlyBills]   = useState<any[]>([])
   const [monthlyMonth,   setMonthlyMonth]   = useState(currentMonth())
@@ -1008,18 +1040,21 @@ export default function BillingPage() {
 
   const handleGenerateSpecialForAll = async () => {
     if (bulkItems.length === 0) return
+    if (bulkDueDate && isPastDate(bulkDueDate)) {
+      setBulkMsg({ ok: false, text: 'Past due date is not allowed for special challans.' })
+      return
+    }
     setBulkRunning(true)
     setBulkMsg(null)
     try {
       const result = await ipc.invoke('db:generate-special-bills-all', {
         items: bulkItems,
-        billingMonth: genMonth,
         notes: bulkNotes.trim() || null,
         dueDate: bulkDueDate || undefined,
       })
       setBulkMsg({
         ok: true,
-        text: `✓ Generated ${result.generated} special bill(s) for ${result.billingMonth || genMonth}${result.skipped ? ` · ${result.skipped} skipped` : ''}`,
+        text: `✓ Generated ${result.generated} special bill(s)${result.skipped ? ` · ${result.skipped} skipped` : ''}`,
       })
       setBulkItems([])
       setBulkNotes('')
@@ -1031,16 +1066,88 @@ export default function BillingPage() {
     }
   }
 
+  const handleExportSpecialPdfFolder = async () => {
+    setIsSpecialExporting(true)
+    setSpecialExportMsg(null)
+    try {
+      const result = await ipc.invoke('db:export-special-bills-pdf')
+      const folderName = String(result.folderPath || '').split(/[\\/]/).pop() || 'special-bills-pending'
+      setSpecialExportMsg({
+        text: `✓ Exported ${result.exported} pending special bill PDF(s) to Downloads/${folderName}${result.skipped ? ` · ${result.skipped} skipped` : ''}`,
+        ok: true,
+      })
+    } catch (e: any) {
+      setSpecialExportMsg({ text: e.message || 'Failed to export special bills', ok: false })
+    } finally {
+      setIsSpecialExporting(false)
+    }
+  }
+
   const handleGenerate = async () => {
+    const monthToGenerate = String(genMonth || '').slice(0, 7)
+    if (!monthToGenerate) {
+      setGenMsg({ text:'Select a valid billing month', ok:false })
+      return
+    }
+    if (isPastMonth(monthToGenerate)) {
+      setGenMsg({ text:'Generating bills for previous months is locked. Select current or future month.', ok:false })
+      return
+    }
     setIsGenerating(true); setGenMsg(null)
     try {
       const r = await ipc.invoke('db:generate-monthly-bills', {
-        billingMonth: genMonth,
+        billingMonth: monthToGenerate,
         notice: genNotice.trim() || null,
       })
-      setGenMsg({ text:`✓ Generated ${r.generated} bill(s) for ${genMonth}`, ok:true })
+      setGenMsg({ text:`✓ Generated ${r.generated} bill(s) for ${monthToGenerate}`, ok:true })
     } catch (e:any) { setGenMsg({ text:e.message, ok:false }) }
     finally { setIsGenerating(false) }
+  }
+
+  const handleTenantGenerate = async () => {
+    const monthToGen = String(tenantMonth || currentMonth()).slice(0, 7)
+    if (isPastMonth(monthToGen)) {
+      setTenantGenMsg({ text:'Generating bills for previous months is locked. Select current or future month.', ok:false })
+      return
+    }
+
+    setIsGenForTenant(true); setTenantGenMsg(null)
+    try {
+      const r = await ipc.invoke('db:generate-monthly-bills', {
+        billingMonth: monthToGen,
+        notice: null,
+      })
+      setTenantGenMsg({ text:`✓ Generated ${r.generated} bill(s) for ${monthToGen}`, ok:true })
+      // Directly reload — avoid stale closure by calling IPC with known params
+      setTenantLoading(true)
+      const fresh = await ipc.invoke('db:get-bills', { billType: 'tenant', allMonths: true })
+      setTenantBills(fresh || [])
+      setTenantAllMonths(true)
+      setTenantStatus('all')
+      setTenantLoading(false)
+    } catch (e:any) { setTenantGenMsg({ text:e.message, ok:false }) }
+    finally { setIsGenForTenant(false) }
+  }
+
+  const handleExportPdfFolder = async () => {
+    setIsExporting(true)
+    setExportMsg(null)
+    try {
+      const result = await ipc.invoke('db:export-month-challans-pdf', {
+        billingMonth: genMonth,
+      })
+
+      const folderName = String(result.folderPath || '').split(/[\\/]/).pop() || `challans-${genMonth}`
+
+      setExportMsg({
+        text: `✓ Exported ${result.exported} challan PDF(s) to Downloads/${folderName}${result.skipped ? ` · ${result.skipped} skipped` : ''}`,
+        ok: true,
+      })
+    } catch (e: any) {
+      setExportMsg({ text: e.message || 'Failed to export challans', ok: false })
+    } finally {
+      setIsExporting(false)
+    }
   }
 
   const handleLateFees = async () => {
@@ -1086,6 +1193,38 @@ export default function BillingPage() {
     setRemarksDialog({ open: false, bill: null, amount: null })
     setRemarksInput('')
   }
+  const requestVoidBill = (bill: any) => {
+    setVoidDialog({ open: true, bill })
+    setVoidReason('')
+    setVoidMsg(null)
+  }
+  const handleConfirmVoid = async () => {
+    if (!voidDialog.bill) return
+    setVoidLoading(true)
+    setVoidMsg(null)
+    try {
+      const reason = voidReason.trim() || 'Voided from billing module'
+      await ipc.invoke('db:void-bill', {
+        billId: voidDialog.bill.id,
+        reason,
+        voidedBy: null,
+      })
+      setVoidDialog({ open: false, bill: null })
+      setVoidReason('')
+      setVoidMsg({ text: '✓ Bill has been voided successfully', ok: true })
+      if (tab === 'monthly') loadMonthly()
+      if (tab === 'tenant') loadTenant()
+      if (tab === 'special') loadSpecial()
+    } catch (e: any) {
+      setVoidMsg({ text: e.message || 'Failed to void bill', ok: false })
+    } finally {
+      setVoidLoading(false)
+    }
+  }
+  const handleCancelVoid = () => {
+    setVoidDialog({ open: false, bill: null })
+    setVoidReason('')
+  }
   const closePayment = () => { setPayingBill(null); setPayDetail(null) }
   const onPaymentSuccess = () => {
     if (tab === 'monthly') loadMonthly()
@@ -1128,13 +1267,6 @@ export default function BillingPage() {
           <h1>Billing</h1>
           <p className="subtitle">Generate bills, collect payments, and manage special charges</p>
         </div>
-        <div>
-          <button onClick={async () => {
-            await ipc.invoke('db:diagnose-bills')
-          }} style={{ padding:'0.5rem 1rem', background:'var(--accent)', color:'#fff', border:'none', borderRadius:'var(--r-md)', cursor:'pointer', fontSize:'0.85rem' }}>
-            Diagnose
-          </button>
-        </div>
       </div>
 
       <div style={{ display:'flex', gap:4, background:'var(--bg-page)', border:'1px solid var(--border)', borderRadius:'var(--r-lg)', padding:4, marginBottom:'2.25rem', width:'fit-content' }}>
@@ -1159,12 +1291,25 @@ export default function BillingPage() {
             <div style={{ display:'flex', gap:'0.75rem', alignItems:'flex-end' }}>
               <div className="form-group" style={{ flex:1, marginBottom:0 }}>
                 <label>Billing Month</label>
-                <input type="month" value={genMonth} onChange={e => setGenMonth(e.target.value)} />
+                <input
+                  type="month"
+                  value={genMonth}
+                  min={currentMonth()}
+                  onChange={e => setGenMonth(e.target.value)}
+                />
               </div>
-              <button className="btn btn-primary" onClick={handleGenerate} disabled={isGenerating}>
+              <button className="btn btn-primary" onClick={handleGenerate} disabled={isGenerating || isPastMonth(genMonth)}>
                 {isGenerating ? <><RefreshCw size={15} className="spin"/> Generating…</> : <><Zap size={15}/> Generate Bills</>}
               </button>
+              <button className="btn btn-ghost" onClick={handleExportPdfFolder} disabled={isGenerating || isExporting}>
+                {isExporting ? <><RefreshCw size={15} className="spin"/> Exporting…</> : <><FileText size={15}/> Export PDF Folder</>}
+              </button>
             </div>
+            {isPastMonth(genMonth) && (
+              <div style={{ marginTop:'0.6rem', fontSize:'0.8rem', color:'var(--c-overdue)' }}>
+                Billing lock: previous months cannot be generated.
+              </div>
+            )}
             <div className="form-group" style={{ marginTop: '0.75rem' }}>
               <label>
                 Notice / Remarks
@@ -1183,6 +1328,7 @@ export default function BillingPage() {
               </div>
             </div>
             {genMsg && <div className={`msg ${genMsg.ok ? 'msg-success' : 'msg-error'}`} style={{ marginTop:'1rem' }}>{genMsg.text}</div>}
+            {exportMsg && <div className={`msg ${exportMsg.ok ? 'msg-success' : 'msg-error'}`} style={{ marginTop:'0.75rem' }}>{exportMsg.text}</div>}
           </div>
           <div style={{ background:'var(--bg-card)', border:'1px solid var(--border)', borderRadius:'var(--r-lg)', padding:'1.5rem', boxShadow:'var(--shadow-card)' }}>
             <h3 style={{ marginBottom:'0.25rem' }}>Generate Special Bills (All Members)</h3>
@@ -1216,7 +1362,7 @@ export default function BillingPage() {
                 <option value="">Select charge type…</option>
                 {onetimeCharges.map((c: any) => (
                   <option key={c.id} value={String(c.id)}>
-                    {c.charge_name}
+                    {displaySpecialChargeLabel(c.charge_name)}
                   </option>
                 ))}
                 <option value="custom">Custom Charge</option>
@@ -1287,7 +1433,10 @@ export default function BillingPage() {
             <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'0.75rem' }}>
               <div className="form-group" style={{ marginBottom:0 }}>
                 <label>Due Date <small style={{ color:'var(--t-faint)' }}>(optional)</small></label>
-                <input type="date" value={bulkDueDate} onChange={e => setBulkDueDate(e.target.value)} />
+                <input type="date" value={bulkDueDate} min={currentDate()} onChange={e => setBulkDueDate(e.target.value)} />
+                {bulkDueDate && isPastDate(bulkDueDate) && (
+                  <small style={{ color:'var(--c-overdue)', fontWeight:500, marginTop:'0.25rem', display:'block' }}>⚠ Past dates not allowed</small>
+                )}
               </div>
               <div className="form-group" style={{ marginBottom:0 }}>
                 <label>Notes <small style={{ color:'var(--t-faint)' }}>(optional)</small></label>
@@ -1302,12 +1451,18 @@ export default function BillingPage() {
               <span style={{ fontSize:'0.8rem', color:'var(--t-faint)' }}>
                 Will generate for {plots.length} active plots.
               </span>
-              <button className="btn btn-primary" onClick={handleGenerateSpecialForAll} disabled={bulkRunning || bulkItems.length === 0 || plots.length === 0}>
-                {bulkRunning ? <><RefreshCw size={15} className="spin"/> Generating…</> : <><Zap size={15}/> Generate Special Bills</>}
-              </button>
+              <div style={{ display:'flex', gap:'0.5rem', flexWrap:'wrap', justifyContent:'flex-end' }}>
+                <button className="btn btn-primary" onClick={handleGenerateSpecialForAll} disabled={bulkRunning || bulkItems.length === 0 || plots.length === 0}>
+                  {bulkRunning ? <><RefreshCw size={15} className="spin"/> Generating…</> : <><Zap size={15}/> Generate Special Bills</>}
+                </button>
+                <button className="btn btn-ghost" onClick={handleExportSpecialPdfFolder} disabled={isSpecialExporting}>
+                  {isSpecialExporting ? <><RefreshCw size={15} className="spin"/> Exporting…</> : <><FileText size={15}/> Export PDF Folder</>}
+                </button>
+              </div>
             </div>
 
             {bulkMsg && <div className={`msg ${bulkMsg.ok ? 'msg-success' : 'msg-error'}`} style={{ marginTop:'1rem' }}>{bulkMsg.text}</div>}
+            {specialExportMsg && <div className={`msg ${specialExportMsg.ok ? 'msg-success' : 'msg-error'}`} style={{ marginTop:'0.75rem' }}>{specialExportMsg.text}</div>}
           </div>
 
           <div style={{ background:'var(--bg-card)', border:'1px solid var(--border)', borderRadius:'var(--r-lg)', padding:'1.5rem', boxShadow:'var(--shadow-card)' }}>
@@ -1320,43 +1475,6 @@ export default function BillingPage() {
             </button>
             {feeMsg && <div className={`msg ${feeMsg.ok ? 'msg-success' : 'msg-error'}`} style={{ marginTop:'1rem' }}>{feeMsg.text}</div>}
           </div>
-          <div style={{ background:'var(--bg-card)', border:'1px solid var(--border)', borderRadius:'var(--r-lg)', padding:'1.5rem', boxShadow:'var(--shadow-card)' }}>
-            <h3 style={{ marginBottom:'0.25rem' }}>Fix Bill Items</h3>
-            <p style={{ color:'var(--t-faint)', fontSize:'0.85rem', marginBottom:'1.25rem', lineHeight:1.5 }}>
-              Redistributes old lump-sum arrears rows into per-charge lines. Run once, then this card can be removed.
-            </p>
-            <div style={{ display:'flex', gap:'0.75rem', flexWrap:'wrap' }}>
-              <button className="btn btn-ghost"
-                style={{ borderColor:'var(--accent)', color:'var(--accent)' }}
-                onClick={async () => {
-                  setFixing(true); setFixMsg(null)
-                  try {
-                    const r = await ipc.invoke('db:fix-arrears-bill-items')
-                    setFixMsg({ text: `✓ Fixed ${r.fixed} of ${r.total} bills${r.errors.length ? ` · ${r.errors.length} errors` : ''}`, ok: r.errors.length === 0 })
-                  } catch (e: any) { setFixMsg({ text: e.message, ok: false }) }
-                  finally { setFixing(false) }
-                }}
-                disabled={fixing}>
-                {fixing
-                  ? <><RefreshCw size={15} className="spin"/> Fixing…</>
-                  : <>⚙ Redistribute Arrears</>}
-              </button>
-              <button className="btn btn-ghost"
-                style={{ borderColor: 'var(--c-overdue)', color: 'var(--c-overdue)' }}
-                onClick={async () => {
-                  const r = await ipc.invoke('db:restore-all-bill-items')
-                  alert(`Restored ${r.fixed} bills`)
-                }}>
-                ⚙ Restore Bill Items
-              </button>
-            </div>
-            {fixMsg && (
-              <div className={`msg ${fixMsg.ok ? 'msg-success' : 'msg-error'}`}
-                style={{ marginTop:'1rem' }}>
-                {fixMsg.text}
-              </div>
-            )}
-          </div>
         </div>
       )}
 
@@ -1368,8 +1486,10 @@ export default function BillingPage() {
           <BillsTable bills={filterBills(monthlyBills, monthlySearch)} loading={monthlyLoading} mode="monthly"
             onCollect={openPayment}
             onStatement={bill => setStatementBill(bill)}
-            onPrint={handlePrint} />
+            onPrint={handlePrint}
+            onVoid={requestVoidBill} />
           {printMsg && <div className={`msg ${printMsg.ok ? 'msg-success' : 'msg-error'}`} style={{ marginTop:'1rem' }}>{printMsg.text}</div>}
+          {voidMsg && <div className={`msg ${voidMsg.ok ? 'msg-success' : 'msg-error'}`} style={{ marginTop:'0.75rem' }}>{voidMsg.text}</div>}
         </>
       )}
 
@@ -1435,29 +1555,16 @@ export default function BillingPage() {
               <Users size={13}/> Manage Tenants
             </button>
             <button className="btn btn-primary btn-sm"
-              disabled={isGenForTenant}
-              onClick={async () => {
-                const monthToGen = tenantMonth || currentMonth()
-                setIsGenForTenant(true); setTenantGenMsg(null)
-                try {
-                  const r = await ipc.invoke('db:generate-monthly-bills', {
-                    billingMonth: monthToGen,
-                    notice: null,
-                  })
-                  setTenantGenMsg({ text:`✓ Generated ${r.generated} bill(s) for ${monthToGen}`, ok:true })
-                  // Directly reload — avoid stale closure by calling IPC with known params
-                  setTenantLoading(true)
-                  const fresh = await ipc.invoke('db:get-bills', { billType: 'tenant', allMonths: true })
-                  setTenantBills(fresh || [])
-                  setTenantAllMonths(true)
-                  setTenantStatus('all')
-                  setTenantLoading(false)
-                } catch (e:any) { setTenantGenMsg({ text:e.message, ok:false }) }
-                finally { setIsGenForTenant(false) }
-              }}>
+              disabled={isGenForTenant || isPastMonth(tenantMonth || currentMonth())}
+              onClick={handleTenantGenerate}>
               <Zap size={13}/> {isGenForTenant ? 'Generating…' : `Generate for ${tenantMonth || currentMonth()}`}
             </button>
           </div>
+          {isPastMonth(tenantMonth || currentMonth()) && (
+            <div style={{ marginTop:'-0.55rem', marginBottom:'0.75rem', fontSize:'0.8rem', color:'var(--c-overdue)' }}>
+              Billing lock: switch to current or future month to generate tenant challans.
+            </div>
+          )}
           {tenantGenMsg && (
             <div className={`msg ${tenantGenMsg.ok ? 'msg-success' : 'msg-error'}`} style={{ marginBottom:'0.75rem' }}>
               {tenantGenMsg.text}
@@ -1469,7 +1576,9 @@ export default function BillingPage() {
           <BillsTable bills={filterBills(tenantBills, tenantSearch)} loading={tenantLoading} mode="tenant"
             onCollect={openPayment}
             onStatement={bill => setStatementBill(bill)}
-            onPrint={handlePrint} />
+            onPrint={handlePrint}
+            onVoid={requestVoidBill} />
+          {voidMsg && <div className={`msg ${voidMsg.ok ? 'msg-success' : 'msg-error'}`} style={{ marginTop:'0.75rem' }}>{voidMsg.text}</div>}
         </>
       )}
 
@@ -1525,11 +1634,21 @@ export default function BillingPage() {
                       <td style={{ textAlign:'right', fontFamily:'IBM Plex Mono', color:'var(--c-paid)' }}>{fmt(b.amount_paid)}</td>
                       <td><StatusBadge status={b.status}/></td>
                       <td onClick={e => e.stopPropagation()}>
-                        {['unpaid', 'partial', 'overdue'].includes(b.status) && (
-                          <button className="btn btn-primary btn-sm" onClick={() => openPayment(b)}>
-                            <CreditCard size={13}/> Collect
+                        <div style={{ display:'flex', gap:6 }}>
+                          {['unpaid', 'partial', 'overdue'].includes(b.status) && (
+                            <button className="btn btn-primary btn-sm" onClick={() => openPayment(b)}>
+                              <CreditCard size={13}/> Collect
+                            </button>
+                          )}
+                          <button className="btn btn-ghost btn-sm" onClick={() => handlePrint(b)} title="Print Challan">
+                            <Printer size={13} />
                           </button>
-                        )}
+                          {b.status !== 'voided' && b.status !== 'paid' && (
+                            <button className="btn btn-ghost btn-sm" onClick={() => requestVoidBill(b)} title="Void Bill" style={{ color:'var(--c-overdue)' }}>
+                              <X size={13} />
+                            </button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                     {expandedId === b.id && (
@@ -1569,7 +1688,46 @@ export default function BillingPage() {
               </tbody>
             </table>
           </div>
+          {voidMsg && <div className={`msg ${voidMsg.ok ? 'msg-success' : 'msg-error'}`} style={{ marginTop:'0.75rem' }}>{voidMsg.text}</div>}
         </>
+      )}
+
+      {voidDialog.open && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(0,0,0,0.3)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999
+        }}>
+          <div style={{
+            background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 'var(--r-lg)',
+            padding: '1.5rem', width: '90%', maxWidth: '420px', boxShadow: 'var(--shadow-card)'
+          }}>
+            <h3 style={{ marginBottom: '0.5rem' }}>Void Bill</h3>
+            <p style={{ color: 'var(--t-faint)', fontSize: '0.9rem', marginBottom: '1rem' }}>
+              This will mark the bill as voided. Please enter a reason.
+            </p>
+            <textarea
+              value={voidReason}
+              onChange={(e) => setVoidReason(e.target.value)}
+              maxLength={200}
+              placeholder="e.g. Bill generated by mistake"
+              style={{
+                width: '100%', padding: '0.75rem', border: '1px solid var(--border)',
+                borderRadius: 'var(--r-md)', fontFamily: 'inherit', fontSize: '0.9rem',
+                minHeight: '90px', background: 'var(--bg-input)', color: 'var(--t-primary)',
+                boxSizing: 'border-box', marginBottom: '0.5rem', resize: 'vertical'
+              }}
+            />
+            <div style={{ marginBottom: '1rem', fontSize: '0.75rem', color: 'var(--t-faint)', textAlign: 'right' }}>
+              {voidReason.length}/200
+            </div>
+            <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'flex-end' }}>
+              <button className="btn btn-ghost" onClick={handleCancelVoid} disabled={voidLoading}>Cancel</button>
+              <button className="btn btn-primary" onClick={handleConfirmVoid} disabled={voidLoading}>
+                {voidLoading ? <><RefreshCw size={15} className="spin"/> Voiding…</> : <>Void Bill</>}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {payingBill && (

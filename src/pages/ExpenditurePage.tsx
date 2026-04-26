@@ -59,6 +59,10 @@ const empty = {
     accountId: '',
 }
 
+function displayExpenseCategory(name: string) {
+    return /^(other|others)$/i.test(String(name || '').trim()) ? 'General Operating Expenses' : name
+}
+
 function ModalOverlay({ onClose, children }: { onClose:()=>void; children:React.ReactNode }) {
   return (
     <div style={{ position:'fixed', inset:0, zIndex:999, background:'rgba(0,0,0,0.35)' }}
@@ -106,6 +110,14 @@ function ExpenseForm({
     }, [])
 
     const category = f.category
+    const previewCategoryLabel = (() => {
+        const normalized = displayExpenseCategory(category || '')
+        return /expense/i.test(normalized) ? normalized : `${normalized} Expense`
+    })()
+    const amountValue = parseFloat(f.amount) || 0
+    const availableBalance = f.paymentMethod === 'bank' ? bankBalance : cashBalance
+    const isOverAvailable = amountValue > 0 && amountValue > availableBalance
+    const shortBy = isOverAvailable ? amountValue - availableBalance : 0
     const canSave = !!category && !!f.description && parseFloat(f.amount) > 0 && !!f.expenditureDate
 
     const handleSave = async () => {
@@ -151,17 +163,17 @@ function ExpenseForm({
                 {/* Row 1: Date + Category */}
                 <div className="form-grid" style={{ marginBottom: 14 }}>
                     <div className="form-group">
-                        <label>Date</label>
+                        <label>Date <span style={{ color: 'var(--c-overdue)', fontSize: 11, verticalAlign: 'top' }}>*</span></label>
                         <input type="date" value={f.expenditureDate}
                             onChange={e => setF({ ...f, expenditureDate: e.target.value })} />
                     </div>
                     <div className="form-group">
-                        <label>Category</label>
+                        <label>Category <span style={{ color: 'var(--c-overdue)', fontSize: 11, verticalAlign: 'top' }}>*</span></label>
                         <select value={f.category}
                             onChange={e => setF({ ...f, category: e.target.value })}>
                             <option value="">Select category...</option>
                             {categories.map(c => (
-                                <option key={c} value={c}>{c}</option>
+                                <option key={c} value={c}>{displayExpenseCategory(c)}</option>
                             ))}
                         </select>
                     </div>
@@ -169,7 +181,7 @@ function ExpenseForm({
 
                 {/* Row 2: Description (full width) */}
                 <div className="form-group" style={{ marginBottom: 14 }}>
-                    <label>Description</label>
+                    <label>Description <span style={{ color: 'var(--c-overdue)', fontSize: 11, verticalAlign: 'top' }}>*</span></label>
                     <input type="text" value={f.description}
                         onChange={e => setF({ ...f, description: e.target.value })}
                         placeholder="What was this expense for?" />
@@ -178,7 +190,7 @@ function ExpenseForm({
                 {/* Row 3: Amount + Method */}
                 <div className="form-grid" style={{ marginBottom: 14 }}>
                     <div className="form-group">
-                        <label>Amount (Rs.)</label>
+                        <label>Amount (Rs.) <span style={{ color: 'var(--c-overdue)', fontSize: 11, verticalAlign: 'top' }}>*</span></label>
                         <input
                             ref={amountRef}
                             type="number" min="0"
@@ -225,6 +237,18 @@ function ExpenseForm({
                     </div>
                 )}
 
+                {isOverAvailable && (
+                    <div className="msg msg-error" style={{ marginBottom: 14 }}>
+                        <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+                        <span>
+                            The entered amount exceeds the currently available {f.paymentMethod === 'bank' ? 'bank' : 'cash'} balance by
+                            {' '}Rs. {shortBy.toLocaleString()}. {f.paymentMethod === 'cash'
+                                ? 'You may wish to review available bank sources before posting this expense.'
+                                : 'You may wish to review another bank source or use cash before posting this expense.'}
+                        </span>
+                    </div>
+                )}
+
                 {/* Row 4: Vendor + Receipt (optional) */}
                 <div className="form-grid" style={{ marginBottom: 14 }}>
                     <div className="form-group">
@@ -258,7 +282,7 @@ function ExpenseForm({
                         <div style={{ display: 'flex', gap: 24 }}>
                             <div>
                                 <span style={{ color: 'var(--c-paid)', fontWeight: 600 }}>Dr. </span>
-                                <span style={{ color: 'var(--t-muted)' }}>{category} Expense</span>
+                                <span style={{ color: 'var(--t-muted)' }}>{previewCategoryLabel}</span>
                                 <span style={{ fontFamily: 'IBM Plex Mono', marginLeft: 8, color: 'var(--t-secondary)' }}>
                                     Rs. {parseFloat(f.amount || '0').toLocaleString()}
                                 </span>
@@ -577,7 +601,7 @@ export default function ExpenditurePage() {
                         ) : displayed.map((e: any) => (
                             <tr key={e.id} onClick={() => setSelected(e)}>
                                 <td style={{ fontFamily: 'IBM Plex Mono', fontSize: 12, color: 'var(--t-faint)' }}>{e.expenditure_date}</td>
-                                <td><span className="badge badge-gray" style={{ fontSize: 11 }}>{e.category}</span></td>
+                                <td><span className="badge badge-gray" style={{ fontSize: 11 }}>{displayExpenseCategory(e.category)}</span></td>
                                 <td style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                                     {e.description}
                                 </td>

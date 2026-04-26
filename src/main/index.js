@@ -2,16 +2,40 @@
 delete process.env.ELECTRON_RUN_AS_NODE;
 
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
-import { join } from 'path';
-import { writeFileSync } from 'fs';
+import { basename, dirname, extname, join } from 'path';
+import { existsSync, mkdirSync, statSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { createHash } from 'crypto';
 import ExcelJS from 'exceljs';
-import { initDatabase, getDb } from './database.js';
-import { generateChallanHTML, printChallan, generateTransferSlipHTML } from './challan-service.js';
+import { ensureBillsVoidMetadata, initDatabase, getDb } from './database.js';
+import { exportChallansAsPdfFiles, generateChallanBatchHTML, generateChallanHTML, printChallan, printChallanBatch, generateTransferSlipHTML } from './challan-service.js';
 
 // ── PIN hashing (SHA-256 — sufficient for offline single-user desktop app) ──
 const hashPin = (pin) => createHash('sha256').update(pin).digest('hex');
+
+function getUniquePath(preferredPath) {
+    const extension = extname(preferredPath);
+    const fileName = basename(preferredPath, extension);
+    const parentDir = dirname(preferredPath);
+
+    let candidate = preferredPath;
+    let suffix = 1;
+    while (existsSync(candidate)) {
+        candidate = join(parentDir, `${fileName} (${suffix})${extension}`);
+        suffix += 1;
+    }
+    return candidate;
+}
+
+function resolveExportDirectoryPath(preferredPath) {
+    if (!existsSync(preferredPath)) return preferredPath;
+    try {
+        if (statSync(preferredPath).isDirectory()) return preferredPath;
+    } catch {
+        // If stat fails, fall back to a unique folder name.
+    }
+    return getUniquePath(preferredPath);
+}
 
 
 
@@ -150,8 +174,19 @@ function recalcPlotBills() {
     return { skipped: true };
 }
 
+function isPastBillingMonth(monthValue) {
+    const month = String(monthValue || '').slice(0, 7);
+    if (!/^\d{4}-\d{2}$/.test(month)) return false;
+    const current = new Date().toISOString().slice(0, 7);
+    return month < current;
+}
+
 function sumStoredArrears(db, { plotId = null, tenantId = null, billingMonth = null, billType = null }) {
-    const where = ['b.balance_due > 0.01', 'b.is_deleted = 0'];
+    const where = [
+        '(CASE WHEN (COALESCE(b.total_amount, 0) - COALESCE(b.amount_paid, 0)) > 0 THEN (COALESCE(b.total_amount, 0) - COALESCE(b.amount_paid, 0)) ELSE 0 END) > 0.01',
+        'b.is_deleted = 0',
+        "b.status != 'voided'",
+    ];
     const params = [];
 
     if (plotId !== null) {
@@ -175,12 +210,32 @@ function sumStoredArrears(db, { plotId = null, tenantId = null, billingMonth = n
     }
 
     const row = db.prepare(`
-        SELECT COALESCE(SUM(b.balance_due), 0) as total
+        SELECT COALESCE(SUM(
+            CASE
+                WHEN (COALESCE(b.total_amount, 0) - COALESCE(b.amount_paid, 0)) > 0
+                THEN (COALESCE(b.total_amount, 0) - COALESCE(b.amount_paid, 0))
+                ELSE 0
+            END
+        ), 0) as total
         FROM bills b
         WHERE ${where.join(' AND ')}
     `).get(...params);
 
     return row?.total || 0;
+}
+
+function reconcilePlotBills(db, plotId) {
+    if (!plotId) return;
+    const ids = db.prepare(`
+      SELECT id
+      FROM bills
+      WHERE plot_id = ? AND is_deleted = 0 AND status != 'voided'
+      ORDER BY billing_month ASC, id ASC
+    `).all(plotId);
+
+    for (const row of ids) {
+      try { syncBillTotals(db, row.id); } catch (_) { /* keep reconciliation best-effort */ }
+    }
 }
 
 function sumBillAdjustments(db, billId) {
@@ -228,6 +283,46 @@ function syncBillTotals(db, billId) {
     }
 
     return { ...bill, total_amount: totalAmount, balance_due: balanceDue, status, adjustment_total: adjustmentTotal };
+}
+
+function refreshOpenBillArrears(db, { plotId }) {
+    if (!plotId) return { updated: 0 };
+
+    const removeArrearsItems = db.prepare("DELETE FROM bill_items WHERE bill_id = ? AND charge_name LIKE '%Arrears%'");
+    const insertArrearsItem = db.prepare("INSERT INTO bill_items (bill_id, charge_name, amount, is_custom) VALUES (?, 'Arrears', ?, 0)");
+
+    const openBills = db.prepare(`
+        SELECT id, bill_type, billing_month, arrears, tenant_id
+        FROM bills
+        WHERE plot_id = ?
+          AND is_deleted = 0
+          AND billing_month IS NOT NULL
+          AND status NOT IN ('paid', 'voided')
+          AND bill_type IN ('monthly', 'tenant')
+        ORDER BY billing_month ASC, id ASC
+    `).all(plotId);
+
+    let updated = 0;
+    for (const bill of openBills) {
+        const recalculatedArrears = bill.bill_type === 'tenant'
+            ? sumStoredArrears(db, { tenantId: bill.tenant_id, billingMonth: bill.billing_month, billType: 'tenant' })
+            : sumStoredArrears(db, { plotId, billingMonth: bill.billing_month });
+
+        const currentArrears = Number(bill.arrears || 0);
+        const arrearsRows = db.prepare("SELECT COUNT(*) as c FROM bill_items WHERE bill_id = ? AND charge_name LIKE '%Arrears%'").get(bill.id);
+        const needsArrearsRowNormalize = Number(arrearsRows?.c || 0) !== (recalculatedArrears > 0.01 ? 1 : 0);
+
+        if (Math.abs(recalculatedArrears - currentArrears) > 0.01 || needsArrearsRowNormalize) {
+            db.prepare('UPDATE bills SET arrears = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+                .run(recalculatedArrears, bill.id);
+            removeArrearsItems.run(bill.id);
+            if (recalculatedArrears > 0.01) insertArrearsItem.run(bill.id, recalculatedArrears);
+            syncBillTotals(db, bill.id);
+            updated++;
+        }
+    }
+
+    return { updated };
 }
 
 ipcMain.handle('db:update-plot', (_e, plot) => {
@@ -329,14 +424,16 @@ const sanitizeMemberPayload = (member = {}) => ({
     notes: member.notes || null,
 });
 
+const digitsOnly = (value) => String(value || '').replace(/\D/g, '');
+
 const validateRequiredMemberFields = (member) => {
     if (!member.member_id) throw new Error('Member ID is required');
     if (!member.name) throw new Error('Name is required');
     if (!member.cnic) throw new Error('CNIC is required');
     if (!member.phone) throw new Error('Phone number is required');
     if (!member.membership_date) throw new Error('Membership date is required');
-    if (!/^\d{13}$/.test(member.cnic)) throw new Error('CNIC must be exactly 13 digits');
-    if (!/^\d{11}$/.test(member.phone)) throw new Error('Phone number must be exactly 11 digits');
+    if (digitsOnly(member.cnic).length !== 13) throw new Error('CNIC must be exactly 13 digits');
+    if (digitsOnly(member.phone).length !== 11) throw new Error('Phone number must be exactly 11 digits');
 };
 
 ipcMain.handle('db:get-members', () => getDb().prepare('SELECT * FROM members WHERE is_deleted = 0 ORDER BY member_id, name').all());
@@ -540,7 +637,12 @@ ipcMain.handle('db:get-tenants', (_e, plotId) => {
 ipcMain.handle('db:add-tenant', (_e, tenant) => {
     const t = sanitizeTenantPayload(tenant);
     validateRequiredTenantFields(t);
-    return getDb().prepare(`
+    const db = getDb();
+    const existingTenantId = db.prepare('SELECT id, is_deleted FROM tenants WHERE tenant_id = ? LIMIT 1').get(t.tenant_id);
+    if (existingTenantId) {
+        throw new Error('Tenant ID already exists. Please use a different Tenant ID.');
+    }
+    return db.prepare(`
         INSERT INTO tenants (tenant_id, name, cnic, phone, plot_id, start_date, end_date, monthly_rent, notes)
         VALUES (@tenant_id, @name, @cnic, @phone, @plot_id, @start_date, @end_date, @monthly_rent, @notes)
     `).run(t);
@@ -549,7 +651,12 @@ ipcMain.handle('db:add-tenant', (_e, tenant) => {
 ipcMain.handle('db:update-tenant', (_e, tenant) => {
     const t = sanitizeTenantPayload(tenant);
     validateRequiredTenantFields(t);
-    return getDb().prepare(`
+    const db = getDb();
+    const duplicateTenantId = db.prepare('SELECT id FROM tenants WHERE tenant_id = ? AND id != ? LIMIT 1').get(t.tenant_id, t.id);
+    if (duplicateTenantId) {
+        throw new Error('Tenant ID already exists. Please use a different Tenant ID.');
+    }
+    return db.prepare(`
         UPDATE tenants SET tenant_id=@tenant_id, name=@name, cnic=@cnic, phone=@phone, plot_id=@plot_id,
         start_date=@start_date, end_date=@end_date, monthly_rent=@monthly_rent, notes=@notes WHERE id=@id
     `).run(t);
@@ -845,15 +952,25 @@ ipcMain.handle('db:unlock-month', (_e, { billingMonth, reason }) => {
 
 ipcMain.handle('db:generate-monthly-bills', (_e, { billingMonth, notice }) => {
     const db = getDb();
+    if (!billingMonth) throw new Error('Billing month is required');
+    if (isPastBillingMonth(billingMonth)) {
+        throw new Error('Generating bills for previous months is not allowed. Select current or future month.');
+    }
     const plots = db.prepare('SELECT * FROM plots WHERE is_deleted = 0').all();
     const templates = db.prepare('SELECT * FROM bill_templates WHERE is_active = 1 ORDER BY sort_order').all();
     const settingsMap = {};
     for (const s of db.prepare('SELECT key, value FROM settings').all()) settingsMap[s.key] = s.value;
 
     const prefix = settingsMap['bill_number_prefix'] || 'RV-';
-    const dueDays = parseInt(settingsMap['default_due_days'] || '15');
+    const parsedDueDays = Number.parseInt(String(settingsMap['default_due_days'] || '15'), 10);
+    const dueDays = Number.isFinite(parsedDueDays) && parsedDueDays >= 0 ? parsedDueDays : 15;
+    const billDateForMonth = `${billingMonth}-01`;
+    const computedDueDate = new Date(billDateForMonth);
+    computedDueDate.setDate(computedDueDate.getDate() + dueDays);
+    const dueDateStrForMonth = computedDueDate.toISOString().split('T')[0];
     const tenantChallanAmount = parseFloat(settingsMap['tenant_challan_amount'] || '2500');
     let generated = 0;
+    let updated = 0;
 
     const MONTHLY_CHARGE_MAP = {};
     try {
@@ -887,9 +1004,12 @@ ipcMain.handle('db:generate-monthly-bills', (_e, { billingMonth, notice }) => {
     if (isLocked) throw new Error(`${billingMonth} is locked. Unlock it before generating bills.`);
 
     db.transaction(() => {
+        const removeArrearsItems = db.prepare("DELETE FROM bill_items WHERE bill_id = ? AND charge_name LIKE '%Arrears%'");
+        const insertArrearsItem = db.prepare("INSERT INTO bill_items (bill_id, charge_name, amount, is_custom) VALUES (?, 'Arrears', ?, 0)");
+
         for (const plot of plots) {
             const owner = db.prepare("SELECT member_id FROM plot_ownership WHERE plot_id = ? AND (end_date IS NULL OR end_date = '') ORDER BY start_date DESC, id DESC LIMIT 1").get(plot.id);
-            const existing = db.prepare("SELECT id FROM bills WHERE plot_id = ? AND billing_month = ? AND bill_type = 'monthly' AND is_deleted = 0").get(plot.id, billingMonth);
+            const existing = db.prepare("SELECT id, status, arrears FROM bills WHERE plot_id = ? AND billing_month = ? AND bill_type = 'monthly' AND is_deleted = 0").get(plot.id, billingMonth);
             if (!existing) {
                 const items = [];
 
@@ -924,10 +1044,8 @@ ipcMain.handle('db:generate-monthly-bills', (_e, { billingMonth, notice }) => {
                     const subtotal = items.reduce((sum, i) => sum + i.amount, 0);
                     const arrears = sumStoredArrears(db, { plotId: plot.id, billingMonth });
                     const total = subtotal + arrears;
-                    const billDate  = billingMonth + '-01';
-                    const dueDate   = new Date(billDate);
-                    dueDate.setDate(dueDate.getDate() + dueDays);
-                    const dueDateStr = dueDate.toISOString().split('T')[0];
+                    const billDate  = billDateForMonth;
+                    const dueDateStr = dueDateStrForMonth;
                     const seq = String((db.prepare('SELECT COUNT(*) as c FROM bills WHERE billing_month = ?').get(billingMonth)?.c || 0) + 1).padStart(3, '0');
                     const billNumber = `${prefix}${billingMonth}-${seq}`;
 
@@ -1024,36 +1142,69 @@ ipcMain.handle('db:generate-monthly-bills', (_e, { billingMonth, notice }) => {
 
                     generated++;
                 }
+            } else if (!['paid', 'voided'].includes(String(existing.status || '').toLowerCase())) {
+                const recalculatedArrears = sumStoredArrears(db, { plotId: plot.id, billingMonth });
+                const currentArrears = Number(existing.arrears || 0);
+                const monthlyArrearsRows = db.prepare("SELECT COUNT(*) as c FROM bill_items WHERE bill_id = ? AND charge_name LIKE '%Arrears%'").get(existing.id);
+                const needsArrearsRowNormalize = Number(monthlyArrearsRows?.c || 0) !== (recalculatedArrears > 0.01 ? 1 : 0);
+                const existingDueDate = db.prepare('SELECT due_date, notice FROM bills WHERE id = ?').get(existing.id);
+                const dueDateNeedsUpdate = String(existingDueDate?.due_date || '') !== dueDateStrForMonth;
+                const noticeNeedsUpdate = String(existingDueDate?.notice || '') !== String(notice || '');
+                if (Math.abs(recalculatedArrears - currentArrears) > 0.01 || needsArrearsRowNormalize || dueDateNeedsUpdate || noticeNeedsUpdate) {
+                    db.prepare('UPDATE bills SET arrears = ?, member_id = ?, due_date = ?, notice = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+                        .run(recalculatedArrears, owner?.member_id || null, dueDateStrForMonth, notice || null, existing.id);
+                    removeArrearsItems.run(existing.id);
+                    if (recalculatedArrears > 0.01) insertArrearsItem.run(existing.id, recalculatedArrears);
+                    syncBillTotals(db, existing.id);
+                    updated++;
+                }
             }
 
-            // Tenant challan
-            const tenant = db.prepare("SELECT id, name FROM tenants WHERE plot_id = ? AND is_deleted = 0 AND (end_date IS NULL OR end_date = '' OR end_date >= date('now'))").get(plot.id);
-            if (tenant) {
-                const existingTenantBill = db.prepare("SELECT id FROM bills WHERE plot_id = ? AND billing_month = ? AND bill_type = 'tenant' AND is_deleted = 0").get(plot.id, billingMonth);
+            // Tenant challans can exist for multiple tenants on the same plot.
+            const tenants = db.prepare(`
+                SELECT id, name
+                FROM tenants
+                WHERE plot_id = ?
+                  AND is_deleted = 0
+                  AND date(start_date) <= date('now')
+                  AND (end_date IS NULL OR end_date = '' OR date(end_date) >= date('now'))
+                ORDER BY date(start_date) DESC, id DESC
+            `).all(plot.id);
+
+            for (const tenant of tenants) {
+                const existingTenantBill = db.prepare(`
+                    SELECT id, status, arrears, tenant_id, member_id
+                    FROM bills
+                    WHERE plot_id = ?
+                      AND tenant_id = ?
+                      AND billing_month = ?
+                      AND bill_type = 'tenant'
+                      AND is_deleted = 0
+                    LIMIT 1
+                `).get(plot.id, tenant.id, billingMonth);
+
+                const tenantItems = [];
+
+                // Keep tenant bill structure consistent each month.
+                tenantItems.push({ charge_name: 'Monthly Tenant Challan', amount: tenantChallanAmount });
+
+                const templateByName = (name) =>
+                    templates.find((t) => t.plot_type === plot.plot_type && t.charge_name === name);
+
+                const mosqueTemplate = templateByName('Contribution for Mosque') || templateByName('Mosque Contribution');
+                const aquiferTemplate = templateByName('Contribution for Aquifer if water connection is provided') || templateByName('Aquifer Contribution');
+                const garbageTemplate = templateByName('Contribution for garbage collection if upper stories are used for residential purpose') || templateByName('Garbage Collection');
+
+                if (mosqueTemplate) tenantItems.push({ charge_name: mosqueTemplate.charge_name, amount: mosqueTemplate.amount });
+                if (aquiferTemplate) tenantItems.push({ charge_name: aquiferTemplate.charge_name, amount: aquiferTemplate.amount });
+                if (garbageTemplate) tenantItems.push({ charge_name: garbageTemplate.charge_name, amount: garbageTemplate.amount });
+
+                const subtotal = tenantItems.reduce((sum, i) => sum + i.amount, 0);
+                const arrears = sumStoredArrears(db, { tenantId: tenant.id, billingMonth, billType: 'tenant' });
+                const total = subtotal + arrears;
+                const billDate = billDateForMonth;
+
                 if (!existingTenantBill) {
-                    const tenantItems = [];
-
-                    // Keep tenant bill structure consistent each month.
-                    tenantItems.push({ charge_name: 'Monthly Tenant Challan', amount: tenantChallanAmount });
-
-                    const templateByName = (name) =>
-                        templates.find((t) => t.plot_type === plot.plot_type && t.charge_name === name);
-
-                    const mosqueTemplate = templateByName('Contribution for Mosque') || templateByName('Mosque Contribution');
-                    const aquiferTemplate = templateByName('Contribution for Aquifer if water connection is provided') || templateByName('Aquifer Contribution');
-                    const garbageTemplate = templateByName('Contribution for garbage collection if upper stories are used for residential purpose') || templateByName('Garbage Collection');
-
-                    if (mosqueTemplate) tenantItems.push({ charge_name: mosqueTemplate.charge_name, amount: mosqueTemplate.amount });
-                    if (aquiferTemplate) tenantItems.push({ charge_name: aquiferTemplate.charge_name, amount: aquiferTemplate.amount });
-                    if (garbageTemplate) tenantItems.push({ charge_name: garbageTemplate.charge_name, amount: garbageTemplate.amount });
-
-                    const subtotal = tenantItems.reduce((sum, i) => sum + i.amount, 0);
-                    const arrears = sumStoredArrears(db, { tenantId: tenant.id, billingMonth, billType: 'tenant' });
-                    const total = subtotal + arrears;
-
-                    const billDate = billingMonth + '-01';
-                    const dueDate = new Date(billDate);
-                    dueDate.setDate(dueDate.getDate() + dueDays);
                     const seq = String((db.prepare('SELECT COUNT(*) as c FROM bills WHERE billing_month = ?').get(billingMonth)?.c || 0) + 1).padStart(3, '0');
                     const tenantBillResult = db.prepare(`
                         INSERT INTO bills (bill_number, plot_id, member_id, tenant_id, bill_type, bill_date, due_date,
@@ -1065,7 +1216,7 @@ ipcMain.handle('db:generate-monthly-bills', (_e, { billingMonth, notice }) => {
                         owner?.member_id || null,
                         tenant.id,
                         billDate,
-                        dueDate.toISOString().split('T')[0],
+                        dueDateStrForMonth,
                         billingMonth,
                         subtotal,
                         arrears,
@@ -1133,12 +1284,31 @@ ipcMain.handle('db:generate-monthly-bills', (_e, { billingMonth, notice }) => {
                         }
                     }
                     generated++;
+                } else if (!['paid', 'voided'].includes(String(existingTenantBill.status || '').toLowerCase())) {
+                    const recalculatedArrears = sumStoredArrears(db, { tenantId: tenant.id, billingMonth, billType: 'tenant' });
+                    const currentArrears = Number(existingTenantBill.arrears || 0);
+                    const tenantArrearsRows = db.prepare("SELECT COUNT(*) as c FROM bill_items WHERE bill_id = ? AND charge_name LIKE '%Arrears%'").get(existingTenantBill.id);
+                    const needsArrearsRowNormalize = Number(tenantArrearsRows?.c || 0) !== (recalculatedArrears > 0.01 ? 1 : 0);
+                    const existingTenantDates = db.prepare('SELECT due_date, notice FROM bills WHERE id = ?').get(existingTenantBill.id);
+                    const tenantDueNeedsUpdate = String(existingTenantDates?.due_date || '') !== dueDateStrForMonth;
+                    const tenantNoticeNeedsUpdate = String(existingTenantDates?.notice || '') !== String(notice || '');
+                    const tenantLinkNeedsUpdate = Number(existingTenantBill.tenant_id || 0) !== Number(tenant.id);
+                    const tenantMemberId = owner?.member_id || null;
+                    const memberLinkNeedsUpdate = Number(existingTenantBill.member_id || 0) !== Number(tenantMemberId || 0);
+                    if (Math.abs(recalculatedArrears - currentArrears) > 0.01 || needsArrearsRowNormalize || tenantDueNeedsUpdate || tenantNoticeNeedsUpdate || tenantLinkNeedsUpdate || memberLinkNeedsUpdate) {
+                        db.prepare('UPDATE bills SET tenant_id = ?, member_id = ?, arrears = ?, due_date = ?, notice = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+                            .run(tenant.id, tenantMemberId, recalculatedArrears, dueDateStrForMonth, notice || null, existingTenantBill.id);
+                        removeArrearsItems.run(existingTenantBill.id);
+                        if (recalculatedArrears > 0.01) insertArrearsItem.run(existingTenantBill.id, recalculatedArrears);
+                        syncBillTotals(db, existingTenantBill.id);
+                        updated++;
+                    }
                 }
             }
         }
 
     })();
-    return { generated, month: billingMonth };
+    return { generated, updated, month: billingMonth };
 });
 
 // ── One-time fix: redistribute Arrears bill_items into per-charge rows ────────
@@ -1343,6 +1513,8 @@ ipcMain.handle('db:add-adjustment', (_e, { billId, amount, reason, createdBy }) 
 
 ipcMain.handle('db:void-bill', (_e, { billId, reason, voidedBy }) => {
     const db = getDb();
+    ensureBillsVoidMetadata(db);
+
     const bill = db.prepare('SELECT * FROM bills WHERE id = ? AND is_deleted = 0').get(billId);
     if (!bill) throw new Error('Bill not found');
     if (bill.status === 'voided') throw new Error('Bill is already voided');
@@ -1361,6 +1533,12 @@ ipcMain.handle('db:void-bill', (_e, { billId, reason, voidedBy }) => {
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
         `).run(note, voidedBy || null, billId);
+
+        const voidDesc = `Bill voided - Plot ${bill.plot_id || '-'} (${bill.bill_number || `Bill ${billId}`})${note ? `: ${note}` : ''}`;
+        db.prepare(`
+            INSERT INTO journal_entries (entry_date, description, voucher_number, reference_type, reference_id)
+            VALUES (date('now'), ?, ?, 'bill_void', ?)
+        `).run(voidDesc, bill.bill_number || null, billId);
 
         writeAuditLog(db, 'bills', billId, 'VOID', {
             reason: note,
@@ -1412,6 +1590,9 @@ ipcMain.handle('db:record-payment', (_e, { billId, amount, paymentMethod, bankId
     `).get(billId);
     if (!bill) throw new Error('Bill not found');
     if (bill.status === 'voided') throw new Error('Cannot record payment on a voided bill');
+
+    // Heal stale balances from legacy data before FIFO allocation.
+    reconcilePlotBills(db, bill.plot_id);
 
         let selectedBank = null;
         if (normalizedPaymentMethod === 'bank') {
@@ -1474,11 +1655,11 @@ ipcMain.handle('db:record-payment', (_e, { billId, amount, paymentMethod, bankId
     }
 
     // ── FIFO: all unpaid bills for this plot, oldest first ───
-    const unpaidBills = db.prepare(`
+        const unpaidBills = db.prepare(`
       SELECT * FROM bills
       WHERE plot_id = ? AND balance_due > 0.01 AND is_deleted = 0
-      ORDER BY billing_month ASC, id ASC
-    `).all(bill.plot_id);
+            ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END, billing_month ASC, id ASC
+        `).all(bill.plot_id, billId);
 
     let remaining = amount;
     
@@ -1490,9 +1671,31 @@ ipcMain.handle('db:record-payment', (_e, { billId, amount, paymentMethod, bankId
             ? db.prepare('SELECT id FROM accounts WHERE account_code = ?').get('1000')
             : db.prepare('SELECT id FROM accounts WHERE id = ?').get(selectedBank.account_id);
 
-        const desc = normalizedPaymentMethod === 'cash'
+        let desc = normalizedPaymentMethod === 'cash'
             ? `Payment received — Plot ${bill.plot_number} (${finalReceipt})`
             : `Payment received via ${selectedBank.bank_name} — Plot ${bill.plot_number} (${finalReceipt})`;
+
+        if (bill.bill_type === 'special') {
+            const savedNote = String(bill.notes || '').trim();
+            let contextLabel = savedNote;
+
+            if (!contextLabel) {
+                const itemNames = db.prepare(`
+                    SELECT charge_name
+                    FROM bill_items
+                    WHERE bill_id = ?
+                      AND charge_name NOT LIKE '%Arrears%'
+                      AND charge_name NOT LIKE '%Late Fee%'
+                    ORDER BY id ASC
+                `).all(bill.id).map((r) => String(r.charge_name || '').trim()).filter(Boolean);
+
+                if (itemNames.length === 1) contextLabel = itemNames[0];
+            }
+
+            desc = contextLabel
+                ? `Plot ${bill.plot_number} - ${contextLabel}`
+                : `Plot ${bill.plot_number}`;
+        }
     const jeResult = db.prepare(`
       INSERT INTO journal_entries
         (entry_date, description, voucher_number, reference_type, reference_id)
@@ -1663,16 +1866,20 @@ ipcMain.handle('db:record-payment', (_e, { billId, amount, paymentMethod, bankId
       `).run(bill.plot_id, remaining);
     }
 
-    writeAuditLog(db, 'payments', paymentId, 'PAYMENT_FIFO', {
+        const arrearsRefresh = refreshOpenBillArrears(db, { plotId: bill.plot_id });
+
+        writeAuditLog(db, 'payments', paymentId, 'PAYMENT_FIFO', {
             billId, amount, paymentMethod: normalizedPaymentMethod, bankId: selectedBank?.id || null,
       receiptNumber: finalReceipt,
-      fundBreakdown: creditAccumulator
+            fundBreakdown: creditAccumulator,
+            arrearsRefreshedBills: arrearsRefresh.updated,
     });
 
     return {
       receiptNumber: finalReceipt,
       advance: remaining > 0.01 ? remaining : 0,
       fundBreakdown: creditAccumulator,
+            arrearsRefreshedBills: arrearsRefresh.updated,
     };
   })();
 });
@@ -1700,6 +1907,7 @@ ipcMain.handle('db:get-running-balance', (_e, plotId) => {
 // ── FIFO Preview (call before posting payment) ────────────────
 ipcMain.handle('db:get-payment-preview', (_e, { plotId, amount }) => {
   const db = getDb();
+    reconcilePlotBills(db, plotId);
   const unpaidBills = db.prepare(`
     SELECT b.*, p.plot_number
     FROM bills b LEFT JOIN plots p ON b.plot_id = p.id
@@ -1770,17 +1978,91 @@ ipcMain.handle('db:apply-late-fees', () => {
     for (const s of db.prepare('SELECT key, value FROM settings').all()) settingsMap[s.key] = s.value;
     const feeType = settingsMap['late_fee_type'] || 'flat';
     const feeValue = parseFloat(settingsMap['late_fee_value'] || '500');
-    const overdue = db.prepare("SELECT * FROM bills WHERE due_date < date('now') AND status IN ('unpaid', 'partial') AND late_fee = 0 AND is_deleted = 0").all();
+    const overdue = db.prepare(`
+        SELECT *
+        FROM bills
+        WHERE bill_date <= date('now')
+          AND status IN ('unpaid', 'partial')
+          AND late_fee = 0
+          AND is_deleted = 0
+        ORDER BY due_date ASC, billing_month ASC, id ASC
+    `).all();
+
+    const groupedOverdue = new Map();
+    for (const bill of overdue) {
+        const ownerKey = (bill.bill_type === 'tenant' && bill.tenant_id)
+            ? `tenant:${bill.tenant_id}`
+            : `plot:${bill.plot_id}`;
+        if (!groupedOverdue.has(ownerKey)) groupedOverdue.set(ownerKey, []);
+        groupedOverdue.get(ownerKey).push(bill);
+    }
+
+    const hasOpenLateFee = db.prepare(`
+                SELECT id, total_amount, late_fee
+        FROM bills
+        WHERE is_deleted = 0
+          AND late_fee > 0
+          AND status IN ('unpaid', 'partial', 'overdue')
+          AND (
+            (bill_type = 'tenant' AND tenant_id = ?)
+            OR (bill_type != 'tenant' AND plot_id = ?)
+          )
+        LIMIT 1
+    `);
+
+    const setOverdueStatus = db.prepare("UPDATE bills SET status = 'overdue', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status IN ('unpaid', 'partial')");
+    const clearLateFeeItems = db.prepare("DELETE FROM bill_items WHERE bill_id = ? AND charge_name LIKE '%Late Fee%'");
+    const insertLateFeeItem = db.prepare("INSERT INTO bill_items (bill_id, charge_name, amount, is_custom) VALUES (?, 'Late Fee', ?, 1)");
+    const applyLateFeeToBill = db.prepare("UPDATE bills SET late_fee = ?, total_amount = total_amount + ?, balance_due = balance_due + ?, status = 'overdue', updated_at = CURRENT_TIMESTAMP WHERE id = ?");
+    const updateLateFeeOnBill = db.prepare("UPDATE bills SET late_fee = ?, total_amount = total_amount + ?, balance_due = balance_due + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?");
+
     let applied = 0;
+    let adjusted = 0;
+    let markedOverdue = 0;
     db.transaction(() => {
-        for (const bill of overdue) {
-            const fee = feeType === 'percentage' ? bill.total_amount * (feeValue / 100) : feeValue;
-            db.prepare("UPDATE bills SET late_fee = ?, total_amount = total_amount + ?, balance_due = balance_due + ?, status = 'overdue', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(fee, fee, fee, bill.id);
-            db.prepare("INSERT INTO bill_items (bill_id, charge_name, amount, is_custom) VALUES (?, 'Late Fee', ?, 1)").run(bill.id, fee);
+        for (const [ownerKey, bills] of groupedOverdue.entries()) {
+            for (const bill of bills) {
+                const statusUpdate = setOverdueStatus.run(bill.id);
+                if ((statusUpdate.changes || 0) > 0) markedOverdue++;
+            }
+
+            const targetBill = bills[0];
+            if (!targetBill) continue;
+
+            const existingLateFee = hasOpenLateFee.get(targetBill.tenant_id || null, targetBill.plot_id || null);
+            if (existingLateFee) {
+                const baseAmount = Number(existingLateFee.total_amount || 0) - Number(existingLateFee.late_fee || 0);
+                const desiredFee = feeType === 'percentage'
+                    ? Math.max(0, baseAmount) * (feeValue / 100)
+                    : feeValue;
+                const currentFee = Number(existingLateFee.late_fee || 0);
+                const feeDelta = desiredFee - currentFee;
+
+                if (Math.abs(feeDelta) > 0.01) {
+                    updateLateFeeOnBill.run(desiredFee, feeDelta, feeDelta, existingLateFee.id);
+                    clearLateFeeItems.run(existingLateFee.id);
+                    insertLateFeeItem.run(existingLateFee.id, desiredFee);
+                    adjusted++;
+                } else {
+                    // Normalize to exactly one late fee row for consistency.
+                    clearLateFeeItems.run(existingLateFee.id);
+                    insertLateFeeItem.run(existingLateFee.id, currentFee);
+                }
+                continue;
+            }
+
+            const fee = feeType === 'percentage'
+                ? Number(targetBill.total_amount || 0) * (feeValue / 100)
+                : feeValue;
+            if (!(fee > 0)) continue;
+
+            applyLateFeeToBill.run(fee, fee, fee, targetBill.id);
+            clearLateFeeItems.run(targetBill.id);
+            insertLateFeeItem.run(targetBill.id, fee);
             applied++;
         }
     })();
-    return { applied };
+    return { applied, adjusted, markedOverdue, scanned: overdue.length };
 });
 
 // ── Special Bills ─────────────────────────────────────────────
@@ -1807,105 +2089,148 @@ ipcMain.handle('db:get-onetime-charges', () => getDb().prepare(`
         charge_name
 `).all());
 
-ipcMain.handle('db:create-special-bill', (_e, payload) => {
-    const db = getDb();
-    const { plotId, notes, dueDate } = payload || {};
+const resolveSpecialBillItems = (db, plot, rawItems) => {
+    const activeCharges = new Map(
+        db.prepare('SELECT * FROM onetime_charges WHERE is_active = 1').all().map((charge) => [String(charge.id), charge])
+    );
 
-    const normalizedItems = Array.isArray(payload?.items)
-        ? payload.items
-            .map((item) => ({
-                chargeName: String(item?.chargeName || '').trim(),
-                amount: Number(item?.amount || 0),
-            }))
-            .filter((item) => item.chargeName && item.amount > 0)
-        : [];
+    return (Array.isArray(rawItems) ? rawItems : [])
+        .map((item) => {
+            const chargeName = String(item?.chargeName || '').trim();
+            const fallbackAmount = Number(item?.amount || 0);
+            if (!chargeName || fallbackAmount <= 0) return null;
 
-    // Backward compatibility for old single-item payload.
+            const chargeId = String(item?.chargeId || '').trim();
+            const transferAmount = Number(item?.transferAmount || 0);
+            const sourceCharge = chargeId && chargeId !== 'custom' ? activeCharges.get(chargeId) : null;
+
+            if (!sourceCharge) {
+                return { chargeName, amount: fallbackAmount };
+            }
+
+            let resolvedAmount = fallbackAmount;
+
+            if (sourceCharge.is_percentage) {
+                const percent = Number(sourceCharge.percentage_value || 0);
+                if (transferAmount > 0 && percent > 0) {
+                    resolvedAmount = Math.round(transferAmount * (percent / 100));
+                }
+            } else {
+                resolvedAmount = Number(sourceCharge.base_amount || fallbackAmount || 0);
+                if (sourceCharge.varies_by_marla && plot?.marla_size && String(plot.marla_size).includes('10')) {
+                    resolvedAmount = resolvedAmount / 2;
+                }
+            }
+
+            if (!(resolvedAmount > 0)) resolvedAmount = fallbackAmount;
+            return {
+                chargeName: chargeName || String(sourceCharge.charge_name || '').trim(),
+                amount: resolvedAmount,
+            };
+        })
+        .filter((item) => item && item.chargeName && item.amount > 0);
+};
+
+const createSpecialBillRecord = (db, { plotId, items, notes, dueDate, billingMonth, billNumber }) => {
+    const plot = db.prepare('SELECT * FROM plots WHERE id = ? AND is_deleted = 0').get(plotId);
+    if (!plot) throw new Error('Plot not found');
+
+    const normalizedItems = resolveSpecialBillItems(db, plot, items)
+        .map((item) => ({
+            chargeName: String(item.chargeName || '').trim(),
+            amount: Number(item.amount || 0),
+        }))
+        .filter((item) => item.chargeName && item.amount > 0);
+
     if (normalizedItems.length === 0) {
-        const legacyChargeName = String(payload?.chargeName || '').trim();
-        const legacyAmount = Number(payload?.amount || 0);
-        if (legacyChargeName && legacyAmount > 0) {
-            normalizedItems.push({ chargeName: legacyChargeName, amount: legacyAmount });
-        }
-    }
-
-    if (!plotId || normalizedItems.length === 0) {
         throw new Error('Please provide plot and at least one valid special charge');
     }
 
-    const plot = db.prepare('SELECT * FROM plots WHERE id = ? AND is_deleted = 0').get(plotId);
-    if (!plot) throw new Error('Plot not found');
-    const owner = db.prepare('SELECT member_id FROM plot_ownership WHERE plot_id = ? AND end_date IS NULL').get(plotId);
+    const owner = db.prepare("SELECT member_id FROM plot_ownership WHERE plot_id = ? AND (end_date IS NULL OR end_date = '') ORDER BY start_date DESC, id DESC LIMIT 1").get(plotId);
     const prefix = db.prepare("SELECT value FROM settings WHERE key = 'bill_number_prefix'").get()?.value || 'RV-';
-    const seq = String((db.prepare('SELECT COUNT(*) as c FROM bills').get()?.c || 0) + 1).padStart(3, '0');
     const today = new Date().toISOString().split('T')[0];
-    const dueDateStr = dueDate || new Date(Date.now() + 15 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-    // Keep special bills outside month-uniqueness enforcement.
-    // The unique index applies only when billing_month is not null.
-    const billingMonth = null;
+    const billDate = billingMonth ? `${billingMonth}-01` : today;
+    const dueDaysRaw = db.prepare("SELECT value FROM settings WHERE key = 'default_due_days'").get()?.value;
+    const dueDaysParsed = Number.parseInt(String(dueDaysRaw || '15'), 10);
+    const effectiveDueDays = Number.isFinite(dueDaysParsed) && dueDaysParsed >= 0 ? dueDaysParsed : 15;
+
+    let dueDateStr = dueDate
+        ? String(dueDate).slice(0, 10)
+        : new Date(Date.parse(billDate) + (effectiveDueDays * 24 * 60 * 60 * 1000)).toISOString().split('T')[0];
+
+    if (dueDateStr && !/^\d{4}-\d{2}-\d{2}$/.test(dueDateStr)) {
+        throw new Error('Invalid due date format. Use YYYY-MM-DD.');
+    }
+    if (dueDateStr && dueDateStr < today) {
+        throw new Error('Past due date is not allowed for special challans.');
+    }
+
     const totalAmount = normalizedItems.reduce((sum, item) => sum + item.amount, 0);
-    
-    return db.transaction(() => {
+
+    const seq = billNumber || `${prefix}SP-${String((db.prepare('SELECT COUNT(*) as c FROM bills').get()?.c || 0) + 1).padStart(3, '0')}`;
+    const chargeMap = {};
+    try {
+        const chargeMapRows = db.prepare('SELECT charge_name, account_code FROM charge_account_map').all();
+        for (const row of chargeMapRows) chargeMap[row.charge_name] = row.account_code;
+    } catch {
+        Object.assign(chargeMap, {
+            'Others': '4021',
+        });
+    }
+
+    const hasCustomCharge = db.prepare(`
+        SELECT 1
+        FROM onetime_charges
+        WHERE lower(trim(charge_name)) = lower(trim(?))
+    `);
+    const upsertCustomCharge = db.prepare(`
+        INSERT INTO onetime_charges (
+            charge_name, base_amount, is_percentage, percentage_value, varies_by_marla, is_active, notes
+        ) VALUES (?, ?, 0, NULL, 0, 1, ?)
+        ON CONFLICT(charge_name) DO UPDATE SET
+            base_amount = excluded.base_amount,
+            is_percentage = excluded.is_percentage,
+            percentage_value = excluded.percentage_value,
+            varies_by_marla = excluded.varies_by_marla,
+            is_active = 1,
+            notes = excluded.notes
+    `);
+    const upsertSpecialChargeMap = db.prepare(`
+        INSERT INTO charge_account_map (charge_name, account_code)
+        VALUES (?, '4021')
+        ON CONFLICT(charge_name) DO UPDATE SET account_code = excluded.account_code
+    `);
+
+    for (const item of normalizedItems) {
+        const exists = hasCustomCharge.get(item.chargeName);
+        if (!exists) {
+            upsertCustomCharge.run(item.chargeName, item.amount, 'Custom special charge');
+        }
+        upsertSpecialChargeMap.run(item.chargeName);
+    }
+
+    const result = db.prepare(`
+        INSERT INTO bills (bill_number, plot_id, member_id, bill_type, bill_date, due_date, billing_month,
+                         subtotal, arrears, total_amount, balance_due, status, notes)
+        VALUES (?, ?, ?, 'special', ?, ?, ?, ?, ?, ?, ?, 'unpaid', ?)
+    `).run(seq, plotId, owner?.member_id || null, billDate, dueDateStr, null,
+           totalAmount, 0, totalAmount, totalAmount, notes || null);
+
+    const insertItem = db.prepare('INSERT INTO bill_items (bill_id, charge_name, amount) VALUES (?, ?, ?)');
+    for (const item of normalizedItems) {
+        insertItem.run(result.lastInsertRowid, item.chargeName, item.amount);
+    }
+
+    if ((totalAmount || 0) > 0.01) {
         const receivableAccount = db.prepare("SELECT id FROM accounts WHERE account_code = '1200'").get();
-        const chargeMap = {};
-        try {
-            const chargeMapRows = db.prepare('SELECT charge_name, account_code FROM charge_account_map').all();
-            for (const row of chargeMapRows) chargeMap[row.charge_name] = row.account_code;
-        } catch {
-            Object.assign(chargeMap, {
-                'Others': '4021',
-            });
-        }
-
-        const hasCustomCharge = db.prepare(`
-            SELECT 1
-            FROM onetime_charges
-            WHERE lower(trim(charge_name)) = lower(trim(?))
-        `);
-        const upsertCustomCharge = db.prepare(`
-            INSERT INTO onetime_charges (
-                charge_name, base_amount, is_percentage, percentage_value, varies_by_marla, is_active, notes
-            ) VALUES (?, ?, 0, NULL, 0, 1, ?)
-            ON CONFLICT(charge_name) DO UPDATE SET
-                base_amount = excluded.base_amount,
-                is_percentage = excluded.is_percentage,
-                percentage_value = excluded.percentage_value,
-                varies_by_marla = excluded.varies_by_marla,
-                is_active = 1,
-                notes = excluded.notes
-        `);
-        const upsertSpecialChargeMap = db.prepare(`
-            INSERT INTO charge_account_map (charge_name, account_code)
-            VALUES (?, '4021')
-            ON CONFLICT(charge_name) DO UPDATE SET account_code = excluded.account_code
-        `);
-
-        for (const item of normalizedItems) {
-            const exists = hasCustomCharge.get(item.chargeName);
-            if (!exists) {
-                upsertCustomCharge.run(item.chargeName, item.amount, 'Custom special charge');
-            }
-            upsertSpecialChargeMap.run(item.chargeName);
-        }
-
-        const result = db.prepare(`
-            INSERT INTO bills (bill_number, plot_id, member_id, bill_type, bill_date, due_date, billing_month,
-                             subtotal, arrears, total_amount, balance_due, status, notes)
-            VALUES (?, ?, ?, 'special', ?, ?, ?, ?, ?, ?, ?, 'unpaid', ?)
-        `).run(`${prefix}SP-${seq}`, plotId, owner?.member_id || null, today, dueDateStr, billingMonth,
-               totalAmount, 0, totalAmount, totalAmount, notes || null);
-
-        const insertItem = db.prepare('INSERT INTO bill_items (bill_id, charge_name, amount) VALUES (?, ?, ?)');
-        for (const item of normalizedItems) {
-            insertItem.run(result.lastInsertRowid, item.chargeName, item.amount);
-        }
-
-        if ((totalAmount || 0) > 0.01 && receivableAccount?.id) {
+        if (receivableAccount?.id) {
             const billId = result.lastInsertRowid;
-            const billDescription = `Special bill generated for Plot ${plot.plot_number}`;
+            const billDescription = normalizedItems.length === 1
+                ? `${normalizedItems[0].chargeName} - Plot ${plot.plot_number}`
+                : `Special bill generated for Plot ${plot.plot_number}`;
             const jeResult = db.prepare(
                 "INSERT INTO journal_entries (entry_date, description, reference_type, reference_id) VALUES (?, ?, 'bill_generation', ?)"
-            ).run(today, billDescription, billId);
+            ).run(billDate, billDescription, billId);
             const jeId = jeResult.lastInsertRowid;
 
             db.prepare(
@@ -1914,7 +2239,7 @@ ipcMain.handle('db:create-special-bill', (_e, payload) => {
 
             db.prepare(
                 "INSERT INTO ledger_entries (entry_date, description, reference_type, reference_id, debit_account_id, amount, journal_entry_id) VALUES (?, ?, 'bill_generation', ?, ?, ?, ?)"
-            ).run(today, billDescription, billId, receivableAccount.id, totalAmount, jeId);
+            ).run(billDate, billDescription, billId, receivableAccount.id, totalAmount, jeId);
 
             const creditsByAccount = {};
             for (const item of normalizedItems) {
@@ -1933,20 +2258,231 @@ ipcMain.handle('db:create-special-bill', (_e, payload) => {
 
                 db.prepare(
                     "INSERT INTO ledger_entries (entry_date, description, reference_type, reference_id, credit_account_id, amount, journal_entry_id) VALUES (?, ?, 'bill_generation', ?, ?, ?, ?)"
-                ).run(today, billDescription, billId, creditAccount.id, amountValue, jeId);
+                ).run(billDate, billDescription, billId, creditAccount.id, amountValue, jeId);
             }
         }
-    })();
+    }
+
+    return { skipped: false, billId: result.lastInsertRowid, billNumber: seq };
+};
+
+ipcMain.handle('db:create-special-bill', (_e, payload) => {
+    const db = getDb();
+    const { plotId, notes, dueDate, billingMonth } = payload || {};
+
+    const normalizedItems = Array.isArray(payload?.items)
+        ? payload.items
+            .map((item) => ({
+                chargeName: String(item?.chargeName || '').trim(),
+                amount: Number(item?.amount || 0),
+                chargeId: item?.chargeId,
+                transferAmount: Number(item?.transferAmount || 0),
+            }))
+            .filter((item) => item.chargeName && item.amount > 0)
+        : [];
+
+    // Backward compatibility for old single-item payload.
+    if (normalizedItems.length === 0) {
+        const legacyChargeName = String(payload?.chargeName || '').trim();
+        const legacyAmount = Number(payload?.amount || 0);
+        if (legacyChargeName && legacyAmount > 0) {
+            normalizedItems.push({ chargeName: legacyChargeName, amount: legacyAmount, chargeId: 'custom', transferAmount: 0 });
+        }
+    }
+
+    if (!plotId || normalizedItems.length === 0) {
+        throw new Error('Please provide plot and at least one valid special charge');
+    }
+
+    return getDb().transaction(() => createSpecialBillRecord(getDb(), {
+        plotId,
+        items: normalizedItems,
+        notes,
+        dueDate,
+        billingMonth: null,
+    }))();
 });
 
 ipcMain.handle('db:generate-special-bills-all', (_e, payload) => {
-    return {
-        generated: 0,
-        skipped: 0,
-        totalPlots: 0,
-        billingMonth: payload?.billingMonth || null,
-        message: 'Special bill batch generation is disabled while bills are immutable.'
-    };
+    const db = getDb();
+    const plots = db.prepare('SELECT * FROM plots WHERE is_deleted = 0 ORDER BY plot_number').all();
+    const baseItems = Array.isArray(payload?.items)
+        ? payload.items
+            .map((item) => ({
+                chargeId: item?.chargeId,
+                chargeName: String(item?.chargeName || '').trim(),
+                amount: Number(item?.amount || 0),
+                transferAmount: Number(item?.transferAmount || 0),
+            }))
+            .filter((item) => item.chargeName && item.amount > 0)
+        : [];
+
+    if (baseItems.length === 0) {
+        throw new Error('Please add at least one special charge before generating bills');
+    }
+
+    let generated = 0;
+    let skipped = 0;
+    const errors = [];
+    let nextSeq = (db.prepare('SELECT COUNT(*) as c FROM bills').get()?.c || 0) + 1;
+
+    return db.transaction(() => {
+        for (const plot of plots) {
+            try {
+                const billNumber = `${db.prepare("SELECT value FROM settings WHERE key = 'bill_number_prefix'").get()?.value || 'RV-'}SP-${String(nextSeq++).padStart(3, '0')}`;
+                const result = createSpecialBillRecord(db, {
+                    plotId: plot.id,
+                    items: baseItems,
+                    notes: payload?.notes || null,
+                    dueDate: payload?.dueDate || undefined,
+                    billingMonth: null,
+                    billNumber,
+                });
+                if (result?.skipped) skipped++;
+                else generated++;
+            } catch (error) {
+                skipped++;
+                errors.push({
+                    plotId: plot.id,
+                    plotNumber: plot.plot_number,
+                    message: error?.message || String(error),
+                });
+                console.error(`[Special Bills] Failed for plot ${plot.id} (${plot.plot_number}):`, error);
+            }
+        }
+
+        return {
+            generated,
+            skipped,
+            errors,
+            totalPlots: plots.length,
+            billingMonth: null,
+            message: `Special bill batch generation completed for ${plots.length} plot(s).`,
+        };
+    })();
+});
+
+ipcMain.handle('db:export-special-bills-pdf', async (_e, payload) => {
+    const db = getDb();
+    const bills = db.prepare(`
+        SELECT b.id
+        FROM bills b
+        LEFT JOIN plots p ON p.id = b.plot_id
+        WHERE b.is_deleted = 0
+          AND b.bill_type = 'special'
+          AND b.status IN ('unpaid', 'partial', 'overdue')
+        ORDER BY p.plot_number, b.id
+    `).all();
+
+    if (bills.length === 0) {
+        throw new Error('No pending special bills found');
+    }
+
+    const preferredFolderPath = join(app.getPath('downloads'), 'special-bills-pending');
+    const folderPath = resolveExportDirectoryPath(preferredFolderPath);
+
+    try {
+        mkdirSync(folderPath, { recursive: true });
+    } catch (error) {
+        throw new Error(`Failed to create export folder: ${error?.message || error}`);
+    }
+
+    try {
+        for (const bill of bills) {
+            try { syncBillTotals(db, bill.id); } catch (_) { /* keep export resilient */ }
+        }
+
+        const results = await exportChallansAsPdfFiles({
+            billIds: bills.map((bill) => bill.id),
+            outputDir: folderPath,
+        });
+
+        return {
+            exported: results.filter((result) => !result.skipped).length,
+            skipped: results.filter((result) => result.skipped).length,
+            billingMonth: null,
+            folderPath,
+        };
+    } catch (error) {
+        throw new Error(`Failed to export special bills: ${error?.message || error}`);
+    }
+});
+
+ipcMain.handle('db:print-month-challans', (_e, { billingMonth }) => {
+    const db = getDb();
+    if (!billingMonth) throw new Error('Billing month is required');
+
+    const bills = db.prepare(`
+        SELECT b.id
+        FROM bills b
+        LEFT JOIN plots p ON p.id = b.plot_id
+        WHERE b.is_deleted = 0
+          AND b.status != 'voided'
+          AND b.billing_month = ?
+          AND b.bill_type IN ('monthly', 'tenant')
+        ORDER BY CASE b.bill_type WHEN 'monthly' THEN 0 WHEN 'tenant' THEN 1 ELSE 2 END, p.plot_number, b.id
+    `).all(billingMonth);
+
+    if (bills.length === 0) {
+        throw new Error(`No challans found for ${billingMonth}`);
+    }
+
+    for (const bill of bills) {
+        try { syncBillTotals(db, bill.id); } catch (_) { /* keep printing if one sync fails */ }
+    }
+
+    const html = generateChallanBatchHTML(bills.map((bill) => bill.id));
+    printChallanBatch(html);
+    return { printed: bills.length, billingMonth };
+});
+
+ipcMain.handle('db:export-month-challans-pdf', async (_e, { billingMonth }) => {
+    if (!billingMonth) throw new Error('Billing month is required');
+
+    const db = getDb();
+    const bills = db.prepare(`
+        SELECT b.id
+        FROM bills b
+        LEFT JOIN plots p ON p.id = b.plot_id
+        WHERE b.is_deleted = 0
+          AND b.status != 'voided'
+          AND b.billing_month = ?
+          AND b.bill_type IN ('monthly', 'tenant')
+        ORDER BY CASE b.bill_type WHEN 'monthly' THEN 0 WHEN 'tenant' THEN 1 ELSE 2 END, p.plot_number, b.id
+    `).all(billingMonth);
+
+    if (bills.length === 0) {
+        throw new Error(`No challans found for ${billingMonth}`);
+    }
+
+    const preferredFolderPath = join(app.getPath('downloads'), `challans-${billingMonth}`);
+    const folderPath = resolveExportDirectoryPath(preferredFolderPath);
+
+    try {
+        mkdirSync(folderPath, { recursive: true });
+    } catch (error) {
+        throw new Error(`Failed to create export folder: ${error?.message || error}`);
+    }
+
+    try {
+        for (const bill of bills) {
+            try { syncBillTotals(db, bill.id); } catch (_) { /* keep export resilient */ }
+        }
+
+        const results = await exportChallansAsPdfFiles({
+            billIds: bills.map((bill) => bill.id),
+            outputDir: folderPath,
+        });
+
+        return {
+            exported: results.filter((result) => !result.skipped).length,
+            skipped: results.filter((result) => result.skipped).length,
+            billingMonth,
+            folderPath,
+        };
+    } catch (error) {
+        throw new Error(`Failed to export challans: ${error?.message || error}`);
+    }
 });
 
 // ── Accounting ────────────────────────────────────────────────
@@ -1977,6 +2513,113 @@ ipcMain.handle('db:get-ledger-headings-summary', (_e, { startDate, endDate }) =>
     const db = getDb();
     const start = startDate || '1900-01-01';
     const end = endDate || '2999-12-31';
+
+    const dueRows = db.prepare(`
+        WITH base_items AS (
+            SELECT
+                b.id AS bill_id,
+                bi.charge_name,
+                bi.amount,
+                b.balance_due
+            FROM bills b
+            JOIN bill_items bi ON bi.bill_id = b.id
+            WHERE b.is_deleted = 0
+              AND b.bill_date BETWEEN ? AND ?
+              AND bi.charge_name NOT LIKE '%Arrears%'
+              AND bi.charge_name NOT LIKE '%Late Fee%'
+        ),
+        item_totals AS (
+            SELECT bill_id, SUM(amount) AS items_sum
+            FROM base_items
+            GROUP BY bill_id
+        )
+        SELECT
+            COALESCE(cam.account_code, '4000') AS account_code,
+            COALESCE(SUM(
+                CASE
+                    WHEN it.items_sum > 0 THEN bi.balance_due * (bi.amount / it.items_sum)
+                    ELSE 0
+                END
+            ), 0) AS total_due
+        FROM base_items bi
+        JOIN item_totals it ON it.bill_id = bi.bill_id
+        LEFT JOIN charge_account_map cam ON lower(trim(cam.charge_name)) = lower(trim(bi.charge_name))
+        GROUP BY COALESCE(cam.account_code, '4000')
+    `).all(start, end);
+
+    const collectedRows = db.prepare(`
+        WITH alloc AS (
+            WITH base_items AS (
+                SELECT b.id AS bill_id, bi.charge_name, bi.amount
+                FROM bills b
+                JOIN bill_items bi ON bi.bill_id = b.id
+                WHERE b.is_deleted = 0
+                  AND bi.charge_name NOT LIKE '%Arrears%'
+                  AND bi.charge_name NOT LIKE '%Late Fee%'
+            ),
+            item_totals AS (
+                SELECT bill_id, SUM(amount) AS items_sum
+                FROM base_items
+                GROUP BY bill_id
+            )
+            SELECT
+                COALESCE(cam.account_code, '4000') AS account_code,
+                COALESCE(SUM(
+                    CASE
+                        WHEN it.items_sum > 0 THEN pa.amount_applied * (bi.amount / it.items_sum)
+                        ELSE 0
+                    END
+                ), 0) AS total_collected
+            FROM payment_allocations pa
+            JOIN payments p ON p.id = pa.payment_id
+            JOIN base_items bi ON bi.bill_id = pa.bill_id
+            JOIN item_totals it ON it.bill_id = bi.bill_id
+            LEFT JOIN charge_account_map cam ON lower(trim(cam.charge_name)) = lower(trim(bi.charge_name))
+            WHERE p.payment_date BETWEEN ? AND ?
+            GROUP BY COALESCE(cam.account_code, '4000')
+        ),
+        direct AS (
+            WITH base_items AS (
+                SELECT b.id AS bill_id, bi.charge_name, bi.amount
+                FROM bills b
+                JOIN bill_items bi ON bi.bill_id = b.id
+                WHERE b.is_deleted = 0
+                  AND bi.charge_name NOT LIKE '%Arrears%'
+                  AND bi.charge_name NOT LIKE '%Late Fee%'
+            ),
+            item_totals AS (
+                SELECT bill_id, SUM(amount) AS items_sum
+                FROM base_items
+                GROUP BY bill_id
+            )
+            SELECT
+                COALESCE(cam.account_code, '4000') AS account_code,
+                COALESCE(SUM(
+                    CASE
+                        WHEN it.items_sum > 0 THEN p.amount * (bi.amount / it.items_sum)
+                        ELSE 0
+                    END
+                ), 0) AS total_collected
+            FROM payments p
+            LEFT JOIN payment_allocations pa ON pa.payment_id = p.id
+            JOIN base_items bi ON bi.bill_id = p.bill_id
+            JOIN item_totals it ON it.bill_id = bi.bill_id
+            LEFT JOIN charge_account_map cam ON lower(trim(cam.charge_name)) = lower(trim(bi.charge_name))
+            WHERE pa.id IS NULL
+              AND p.payment_date BETWEEN ? AND ?
+            GROUP BY COALESCE(cam.account_code, '4000')
+        )
+        SELECT account_code, SUM(total_collected) AS total_collected
+        FROM (
+            SELECT account_code, total_collected FROM alloc
+            UNION ALL
+            SELECT account_code, total_collected FROM direct
+        ) x
+        GROUP BY account_code
+    `).all(start, end, start, end);
+
+    const dueByAccount = new Map(dueRows.map((row) => [String(row.account_code), Number(row.total_due || 0)]));
+    const collectedByAccount = new Map(collectedRows.map((row) => [String(row.account_code), Number(row.total_collected || 0)]));
 
     return db.prepare(`
         SELECT
@@ -2020,6 +2663,8 @@ ipcMain.handle('db:get-ledger-headings-summary', (_e, { startDate, endDate }) =>
         ORDER BY a.account_code
     `).all(start, end, start, end).map((row) => ({
         ...row,
+        total_due: Math.round((dueByAccount.get(String(row.account_code)) || 0) * 100) / 100,
+        total_collected: Math.round((collectedByAccount.get(String(row.account_code)) || 0) * 100) / 100,
         balance: row.normal_balance === 'debit'
             ? Number(row.total_debit || 0) - Number(row.total_credit || 0)
             : Number(row.total_credit || 0) - Number(row.total_debit || 0),
@@ -2030,9 +2675,21 @@ ipcMain.handle('db:get-ledger-headings-summary', (_e, { startDate, endDate }) =>
 ipcMain.handle('db:create-journal-entry', (_e, { entryDate, description, lines }) => {
     const db = getDb();
     return db.transaction(() => {
+        const normalizedLines = Array.isArray(lines) ? lines.map((line) => ({
+            ...line,
+            debit: Number(line?.debit || 0),
+            credit: Number(line?.credit || 0),
+        })) : [];
+
+        const totalDebit = normalizedLines.reduce((sum, line) => sum + (line.debit || 0), 0);
+        const totalCredit = normalizedLines.reduce((sum, line) => sum + (line.credit || 0), 0);
+        if (Math.abs(totalDebit - totalCredit) > 0.01) {
+            throw new Error(`Journal entry is not balanced: debit ${totalDebit.toLocaleString('en-PK')} does not match credit ${totalCredit.toLocaleString('en-PK')}`);
+        }
+
         const jeResult = db.prepare("INSERT INTO journal_entries (entry_date, description, reference_type) VALUES (?, ?, 'manual')").run(entryDate, description);
         const jeId = jeResult.lastInsertRowid;
-        for (const line of lines) {
+        for (const line of normalizedLines) {
             db.prepare('INSERT INTO journal_lines (journal_entry_id, account_id, debit, credit) VALUES (?, ?, ?, ?)').run(jeId, line.accountId, line.debit || 0, line.credit || 0);
             if (line.debit > 0) db.prepare('INSERT INTO ledger_entries (entry_date, description, reference_type, reference_id, debit_account_id, amount, journal_entry_id) VALUES (?, ?, ?, ?, ?, ?, ?)').run(entryDate, description, 'manual', jeId, line.accountId, line.debit, jeId);
             if (line.credit > 0) db.prepare('INSERT INTO ledger_entries (entry_date, description, reference_type, reference_id, credit_account_id, amount, journal_entry_id) VALUES (?, ?, ?, ?, ?, ?, ?)').run(entryDate, description, 'manual', jeId, line.accountId, line.credit, jeId);
@@ -2279,14 +2936,21 @@ ipcMain.handle('db:get-fund-summary', (_e, { startDate, endDate } = {}) => {
 ipcMain.handle('db:report-trial-balance', (_e, { startDate, endDate }) => {
     const db = getDb();
     const params = [];
-    let dateFilter = '';
-    if (startDate && endDate) { dateFilter = ' AND je.entry_date BETWEEN ? AND ?'; params.push(startDate, endDate); }
+    const hasRange = Boolean(startDate && endDate);
+    const debitExpr = hasRange
+        ? "COALESCE(SUM(CASE WHEN je.entry_date BETWEEN ? AND ? THEN jl.debit ELSE 0 END), 0)"
+        : 'COALESCE(SUM(jl.debit), 0)';
+    const creditExpr = hasRange
+        ? "COALESCE(SUM(CASE WHEN je.entry_date BETWEEN ? AND ? THEN jl.credit ELSE 0 END), 0)"
+        : 'COALESCE(SUM(jl.credit), 0)';
+    if (hasRange) params.push(startDate, endDate, startDate, endDate);
     return db.prepare(`
         SELECT a.account_code, a.account_name, a.account_type, a.normal_balance,
-               COALESCE(SUM(jl.debit), 0) as total_debit, COALESCE(SUM(jl.credit), 0) as total_credit
+               ${debitExpr} as total_debit,
+               ${creditExpr} as total_credit
         FROM accounts a
         LEFT JOIN journal_lines jl ON a.id = jl.account_id
-        LEFT JOIN journal_entries je ON jl.journal_entry_id = je.id ${dateFilter}
+        LEFT JOIN journal_entries je ON jl.journal_entry_id = je.id
         WHERE a.is_active = 1 GROUP BY a.id ORDER BY a.account_code
     `).all(...params);
 });
@@ -2468,13 +3132,12 @@ ipcMain.handle('db:report-special-charges-income', (_e, { startDate, endDate } =
 // ── Backup & Export ───────────────────────────────────────────
 ipcMain.handle('db:create-backup', async () => {
     const db = getDb();
-    const fs = require('fs');
-    const backupDir = join(app.getPath('userData'), 'backups');
-    if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir, { recursive: true });
+    const backupDir = join(app.getPath('downloads'), 'river-view-backups');
+    if (!existsSync(backupDir)) mkdirSync(backupDir, { recursive: true });
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
     const backupPath = join(backupDir, `riverview_backup_${timestamp}.db`);
     await db.backup(backupPath);
-    const stats = fs.statSync(backupPath);
+    const stats = statSync(backupPath);
     db.prepare("INSERT INTO backup_log (backup_date, backup_path, backup_type, file_size) VALUES (datetime('now'), ?, 'manual', ?)").run(backupPath, stats.size);
     return { path: backupPath, size: stats.size, timestamp };
 });
@@ -2704,8 +3367,19 @@ async function exportSpreadsheet(tableType) {
     const { filePath } = await dialog.showSaveDialog({ title: 'Export Data', defaultPath: defaultFilename, filters: [{ name: 'Excel Workbook', extensions: ['xlsx'] }] });
     if (!filePath) return { success: false, message: 'Export cancelled' };
     const keys = customKeys || Object.keys(data[0]);
-    await writeFormattedWorkbook(filePath, tableType, 'River View Cooperative Housing Society Ltd.', `${formatExportHeader(tableType)} Export`, keys, data);
-    return { success: true, path: filePath };
+    let finalPath = filePath;
+    try {
+        await writeFormattedWorkbook(finalPath, tableType, 'River View Cooperative Housing Society Ltd.', `${formatExportHeader(tableType)} Export`, keys, data);
+    } catch (error) {
+        const code = String(error?.code || '').toUpperCase();
+        if (['EACCES', 'EPERM', 'EBUSY', 'EEXIST'].includes(code)) {
+            finalPath = getUniquePath(filePath);
+            await writeFormattedWorkbook(finalPath, tableType, 'River View Cooperative Housing Society Ltd.', `${formatExportHeader(tableType)} Export`, keys, data);
+        } else {
+            throw error;
+        }
+    }
+    return { success: true, path: finalPath, renamed: finalPath !== filePath };
 }
 
 ipcMain.handle('db:export-spreadsheet', async (_e, tableType) => exportSpreadsheet(tableType));
@@ -2765,11 +3439,58 @@ ipcMain.handle('db:update-bill-template', (_e, { id, amount, isActive }) => {
 
 ipcMain.handle('db:update-settings-bulk', (_e, updates) => {
     const db = getDb();
-    return db.transaction(() => {
-        for (const { key, value } of updates) {
-            db.prepare('UPDATE settings SET value = ? WHERE key = ?').run(value, key);
+    const allowedKeys = new Set([
+        'society_name',
+        'society_address',
+        'bill_number_prefix',
+        'default_due_days',
+        'late_fee_type',
+        'late_fee_value',
+        'tenant_challan_amount',
+    ]);
+
+    const normalizeSetting = (key, rawValue) => {
+        const value = String(rawValue ?? '').trim();
+        if (key === 'default_due_days') {
+            const parsed = Number.parseInt(value, 10);
+            if (!Number.isFinite(parsed) || parsed < 0) {
+                throw new Error('Default Due Days must be a non-negative whole number');
+            }
+            return String(parsed);
         }
-        writeAuditLog(db, 'settings', 0, 'UPDATE', { keys: updates.map(u => u.key) });
+        if (key === 'late_fee_type') {
+            const normalized = value.toLowerCase();
+            if (!['flat', 'percentage'].includes(normalized)) {
+                throw new Error('Late Fee Type must be either flat or percentage');
+            }
+            return normalized;
+        }
+        if (key === 'late_fee_value' || key === 'tenant_challan_amount') {
+            const parsed = Number.parseFloat(value);
+            if (!Number.isFinite(parsed) || parsed < 0) {
+                const label = key === 'late_fee_value' ? 'Late Fee Amount / %' : 'Tenant Challan Amount';
+                throw new Error(`${label} must be a non-negative number`);
+            }
+            return String(parsed);
+        }
+        return value;
+    };
+
+    const upsertSetting = db.prepare(`
+        INSERT INTO settings (key, value)
+        VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `);
+
+    return db.transaction(() => {
+        for (const { key, value } of updates || []) {
+            if (!allowedKeys.has(key)) continue;
+            const normalizedValue = normalizeSetting(key, value);
+            upsertSetting.run(key, normalizedValue);
+        }
+        writeAuditLog(db, 'settings', 0, 'UPDATE', {
+            keys: (updates || []).map(u => u.key).filter(k => allowedKeys.has(k)),
+        });
     })();
 });
 
@@ -3563,6 +4284,7 @@ ipcMain.handle('db:print-html-report', (_e, html) => {
 
 ipcMain.handle('db:print-challan', (_e, { billId, amount, remarks }) => {
     try {
+        try { syncBillTotals(getDb(), billId); } catch (_) { /* fallback: still attempt print */ }
         const html = generateChallanHTML(billId, amount ?? null, remarks ?? null);
         printChallan(html);
     } catch (err) {
@@ -3590,6 +4312,7 @@ ipcMain.handle('db:print-bank-to-cash-transfer', (_e, { date, amount, purpose, t
 });
 
 ipcMain.handle('db:get-challan-html', (_e, { billId, amount, remarks }) => {
+    try { syncBillTotals(getDb(), billId); } catch (_) { /* fallback: still return html */ }
     return generateChallanHTML(billId, amount ?? null, remarks ?? null);
 });
 

@@ -4,6 +4,44 @@ import { Plus, X, Search, User, Home, FileText, Check, Trash2, Edit2 } from 'luc
 const ipc = (window as any).ipcRenderer
 const fmt = (n: number) => `Rs. ${(n || 0).toLocaleString()}`
 
+const CNIC_MAX_LEN = 15 // 35201-1234567-1
+const PHONE_MAX_LEN = 12 // 0300-1234567
+
+function normalizeCnicInput(value: string) {
+    const digits = String(value || '').replace(/\D/g, '').slice(0, 13)
+    const p1 = digits.slice(0, 5)
+    const p2 = digits.slice(5, 12)
+    const p3 = digits.slice(12, 13)
+    if (!p1) return ''
+    if (!p2) return p1
+    if (!p3) return `${p1}-${p2}`
+    return `${p1}-${p2}-${p3}`
+}
+
+function normalizePhoneInput(value: string) {
+    let digits = String(value || '').replace(/\D/g, '')
+    // Accept +92XXXXXXXXXX and normalize to 03XXXXXXXXX.
+    if (digits.startsWith('92') && digits.length >= 12) {
+        digits = `0${digits.slice(2)}`
+    }
+    digits = digits.slice(0, 11)
+    const p1 = digits.slice(0, 4)
+    const p2 = digits.slice(4, 11)
+    if (!p1) return ''
+    if (!p2) return p1
+    return `${p1}-${p2}`
+}
+
+function isValidCnic(value: string) {
+    const digits = String(value || '').replace(/\D/g, '')
+    return digits.length === 13
+}
+
+function isValidPhone(value: string) {
+    const digits = String(value || '').replace(/\D/g, '')
+    return digits.length === 11
+}
+
 // ── Status badge ──────────────────────────────────────────────
 function StatusBadge({ status }: { status: string }) {
     const map: Record<string, { label: string, cls: string }> = {
@@ -43,7 +81,8 @@ function TenantForm({ form, onChange, plots }: { form: any, onChange: (f: any) =
                 <div className="form-group">
                     <label>CNIC *</label>
                     <input type="text" value={form.cnic}
-                        onChange={e => set('cnic', e.target.value)}
+                        onChange={e => set('cnic', normalizeCnicInput(e.target.value))}
+                        maxLength={CNIC_MAX_LEN}
                         placeholder="35201-1234567-1"
                         style={{ fontFamily: 'IBM Plex Mono', letterSpacing: '0.02em' }}
                     />
@@ -51,7 +90,8 @@ function TenantForm({ form, onChange, plots }: { form: any, onChange: (f: any) =
                 <div className="form-group">
                     <label>Phone *</label>
                     <input type="text" value={form.phone}
-                        onChange={e => set('phone', e.target.value)}
+                        onChange={e => set('phone', normalizePhoneInput(e.target.value))}
+                        maxLength={PHONE_MAX_LEN}
                         placeholder="0300-1234567"
                         style={{ fontFamily: 'IBM Plex Mono' }}
                     />
@@ -313,6 +353,7 @@ function TenantPanel({ tenant, onClose, onSaved, onDeleted }: {
     const [saving, setSaving] = useState(false)
     const [confirm, setConfirm] = useState(false)
     const [plots, setPlots] = useState<any[]>([])
+    const [err, setErr] = useState('')
 
     useEffect(() => {
         setForm({ ...tenant })
@@ -326,10 +367,15 @@ function TenantPanel({ tenant, onClose, onSaved, onDeleted }: {
 
     const handleSave = async () => {
         if (!String(form.tenant_id || '').trim() || !form.name.trim() || !String(form.cnic || '').trim() || !String(form.phone || '').trim() || !String(form.start_date || '').trim() || !form.plot_id) return
+        if (!isValidCnic(form.cnic)) { setErr('CNIC must be 13 digits'); return }
+        if (!isValidPhone(form.phone)) { setErr('Phone must be 11 digits'); return }
         setSaving(true)
         try {
             await ipc.invoke('db:update-tenant', { ...form, id: tenant.id })
+            setErr('')
             onSaved()
+        } catch (e: any) {
+            setErr(e?.message || 'Failed to save tenant')
         } finally { setSaving(false) }
     }
 
@@ -342,6 +388,7 @@ function TenantPanel({ tenant, onClose, onSaved, onDeleted }: {
         setForm({ ...tenant })
         setMode('view')
         setConfirm(false)
+        setErr('')
     }
 
     const isActive = !tenant.end_date || tenant.end_date === '' || new Date(tenant.end_date) >= new Date()
@@ -396,7 +443,15 @@ function TenantPanel({ tenant, onClose, onSaved, onDeleted }: {
                         <TenantInfo tenant={tenant} />
                     )}
                     {tab === 'overview' && mode === 'edit' && (
-                        <TenantForm form={form} onChange={setForm} plots={plots} />
+                        <>
+                            <TenantForm form={form} onChange={setForm} plots={plots} />
+                            {err && (
+                                <div className="msg msg-error" style={{ marginTop: 14 }}>
+                                    <span>{err}</span>
+                                    <button className="msg-close" onClick={() => setErr('')}>✕</button>
+                                </div>
+                            )}
+                        </>
                     )}
                     {tab === 'statement' && (
                         <TenantStatement tenantId={tenant.id} />
@@ -442,7 +497,7 @@ function TenantPanel({ tenant, onClose, onSaved, onDeleted }: {
                             <>
                                 <button className="btn btn-ghost" onClick={cancelEdit}>Cancel</button>
                                 <button className="btn btn-primary" onClick={handleSave}
-                                    disabled={saving || !String(form.tenant_id || '').trim() || !form.name.trim() || !String(form.cnic || '').trim() || !String(form.phone || '').trim() || !String(form.start_date || '').trim() || !form.plot_id}>
+                                    disabled={saving || !String(form.tenant_id || '').trim() || !form.name.trim() || !isValidCnic(form.cnic) || !isValidPhone(form.phone) || !String(form.start_date || '').trim() || !form.plot_id}>
                                     <Check size={14} />
                                     {saving ? 'Saving...' : 'Save Changes'}
                                 </button>
@@ -474,11 +529,14 @@ function AddTenantPanel({ onClose, onSaved }: { onClose: () => void, onSaved: ()
         if (!form.name.trim()) { setErr('Name is required'); return }
         if (!form.cnic.trim()) { setErr('CNIC is required'); return }
         if (!form.phone.trim()) { setErr('Phone number is required'); return }
+        if (!isValidCnic(form.cnic)) { setErr('CNIC must be 13 digits'); return }
+        if (!isValidPhone(form.phone)) { setErr('Phone must be 11 digits'); return }
         if (!form.plot_id) { setErr('Please select a plot'); return }
         if (!form.start_date) { setErr('Start date is required'); return }
         setSaving(true)
         try {
             await ipc.invoke('db:add-tenant', form)
+            setErr('')
             onSaved()
         } catch (e: any) {
             setErr(e.message || 'Failed to save')
@@ -505,7 +563,7 @@ function AddTenantPanel({ onClose, onSaved }: { onClose: () => void, onSaved: ()
                 <div className="panel-footer" style={{ justifyContent: 'flex-end' }}>
                     <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
                     <button className="btn btn-primary btn-lg" onClick={handleSave}
-                        disabled={saving || !form.tenant_id.trim() || !form.name.trim() || !form.cnic.trim() || !form.phone.trim() || !form.plot_id || !form.start_date}>
+                        disabled={saving || !form.tenant_id.trim() || !form.name.trim() || !isValidCnic(form.cnic) || !isValidPhone(form.phone) || !form.plot_id || !form.start_date}>
                         <Check size={15} />
                         {saving ? 'Saving...' : 'Save Tenant'}
                     </button>

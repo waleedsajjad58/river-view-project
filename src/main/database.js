@@ -26,6 +26,177 @@ export function getDb() {
   return db;
 }
 
+export function ensureBillsVoidMetadata(dbInstance = db) {
+  if (!dbInstance) throw new Error('Database not initialized');
+
+  const columns = [
+    ['notice', 'TEXT'],
+    ['void_reason', 'TEXT'],
+    ['voided_by', 'INTEGER REFERENCES users(id)'],
+    ['voided_at', 'DATETIME'],
+  ];
+
+  for (const [columnName, columnDefinition] of columns) {
+    const exists = dbInstance.prepare(`
+      SELECT 1
+      FROM pragma_table_info('bills')
+      WHERE name = ?
+    `).get(columnName);
+
+    if (!exists) {
+      dbInstance.exec(`ALTER TABLE bills ADD COLUMN ${columnName} ${columnDefinition}`);
+      console.log(`Schema repair applied: added bills.${columnName} column`);
+    }
+  }
+}
+
+export function ensureBillsUniquenessIndexes(dbInstance = db) {
+  if (!dbInstance) throw new Error('Database not initialized');
+
+  const dropIfExists = (indexName) => {
+    try {
+      dbInstance.exec(`DROP INDEX IF EXISTS ${indexName}`);
+    } catch (_) {
+      // Best-effort repair.
+    }
+  };
+
+  dropIfExists('idx_one_bill_per_plot_month');
+  dropIfExists('idx_bills_non_tenant_unique');
+  dropIfExists('idx_bills_tenant_unique');
+
+  dbInstance.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_bills_non_tenant_unique
+    ON bills(plot_id, billing_month, bill_type)
+    WHERE is_deleted = 0 AND billing_month IS NOT NULL AND bill_type != 'tenant';
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_bills_tenant_unique
+    ON bills(plot_id, tenant_id, billing_month, bill_type)
+    WHERE is_deleted = 0 AND billing_month IS NOT NULL AND bill_type = 'tenant';
+  `);
+}
+
+export function normalizeAccountBalances(dbInstance = db) {
+  if (!dbInstance) throw new Error('Database not initialized');
+
+  const rows = dbInstance.prepare(`
+    SELECT id, account_code, account_name, account_type, normal_balance
+    FROM accounts
+    WHERE is_active = 1
+  `).all();
+
+  const desiredByType = {
+    asset: 'debit',
+    expense: 'debit',
+    liability: 'credit',
+    equity: 'credit',
+    revenue: 'credit',
+  };
+
+  const updateStmt = dbInstance.prepare(`
+    UPDATE accounts
+    SET normal_balance = ?
+    WHERE id = ?
+  `);
+
+  let repaired = 0;
+  for (const row of rows) {
+    const desiredBalance = desiredByType[String(row.account_type || '').toLowerCase()] || row.normal_balance || 'debit';
+    if (String(row.normal_balance || '').toLowerCase() !== desiredBalance) {
+      updateStmt.run(desiredBalance, row.id);
+      repaired++;
+    }
+  }
+
+  if (repaired > 0) {
+    console.log(`Schema repair applied: normalized ${repaired} account balance(s)`);
+  }
+
+  return { repaired };
+}
+
+export function ensureMemberTenantIdentityMetadata(dbInstance = db) {
+  if (!dbInstance) throw new Error('Database not initialized');
+
+  const hasColumn = (tableName, columnName) => {
+    const safeTable = tableName === 'members' || tableName === 'tenants' ? tableName : null;
+    if (!safeTable) return false;
+    return dbInstance.prepare(`
+      SELECT 1
+      FROM pragma_table_info('${safeTable}')
+      WHERE name = ?
+    `).get(columnName);
+  };
+
+  const tryExec = (sql) => {
+    try { dbInstance.exec(sql); } catch (_) { /* already exists / not applicable */ }
+  };
+
+  // members.member_id
+  if (!hasColumn('members', 'member_id')) {
+    tryExec(`ALTER TABLE members ADD COLUMN member_id TEXT`);
+  }
+  tryExec(`
+    UPDATE members
+    SET member_id = 'MEM-' || printf('%05d', id)
+    WHERE member_id IS NULL OR TRIM(member_id) = ''
+  `);
+
+  const memberDupes = dbInstance.prepare(`
+    SELECT member_id
+    FROM members
+    WHERE member_id IS NOT NULL AND TRIM(member_id) != ''
+    GROUP BY member_id
+    HAVING COUNT(*) > 1
+  `).all();
+  const memberRowsStmt = dbInstance.prepare('SELECT id FROM members WHERE member_id = ? ORDER BY id ASC');
+  const memberFixStmt = dbInstance.prepare("UPDATE members SET member_id = ? || '-' || id WHERE id = ?");
+  for (const d of memberDupes) {
+    const rows = memberRowsStmt.all(d.member_id);
+    for (let i = 1; i < rows.length; i++) {
+      memberFixStmt.run(d.member_id, rows[i].id);
+    }
+  }
+
+  tryExec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_members_member_id_unique
+    ON members(member_id)
+    WHERE member_id IS NOT NULL AND TRIM(member_id) != ''
+  `);
+
+  // tenants.tenant_id
+  if (!hasColumn('tenants', 'tenant_id')) {
+    tryExec(`ALTER TABLE tenants ADD COLUMN tenant_id TEXT`);
+  }
+  tryExec(`
+    UPDATE tenants
+    SET tenant_id = 'TEN-' || printf('%05d', id)
+    WHERE tenant_id IS NULL OR TRIM(tenant_id) = ''
+  `);
+
+  const tenantDupes = dbInstance.prepare(`
+    SELECT tenant_id
+    FROM tenants
+    WHERE tenant_id IS NOT NULL AND TRIM(tenant_id) != ''
+    GROUP BY tenant_id
+    HAVING COUNT(*) > 1
+  `).all();
+  const tenantRowsStmt = dbInstance.prepare('SELECT id FROM tenants WHERE tenant_id = ? ORDER BY id ASC');
+  const tenantFixStmt = dbInstance.prepare("UPDATE tenants SET tenant_id = ? || '-' || id WHERE id = ?");
+  for (const d of tenantDupes) {
+    const rows = tenantRowsStmt.all(d.tenant_id);
+    for (let i = 1; i < rows.length; i++) {
+      tenantFixStmt.run(d.tenant_id, rows[i].id);
+    }
+  }
+
+  tryExec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_tenants_tenant_id_unique
+    ON tenants(tenant_id)
+    WHERE tenant_id IS NOT NULL AND TRIM(tenant_id) != ''
+  `);
+}
+
 function runMigrations() {
   db.exec(`
     CREATE TABLE IF NOT EXISTS settings (
@@ -173,6 +344,7 @@ function runMigrations() {
         balance_due DECIMAL(10,2) DEFAULT 0,
         credit_applied DECIMAL(10,2) DEFAULT 0,
         status TEXT DEFAULT 'unpaid',
+        notice TEXT,
         extra_config TEXT,
         is_deleted BOOLEAN DEFAULT 0,
         notes TEXT,
@@ -514,17 +686,19 @@ function runMigrations() {
     currentVersion = 6;
   }
 
-  // Migration 7: FIX — correct billing unique index to include bill_type
-  // This replaces the broken Migration 4 index which prevented tenant bills
-  // from being inserted alongside monthly bills for the same plot+month.
+  // Migration 7: FIX — split billing unique index for tenant and non-tenant bills.
   if (currentVersion < 7) {
-    console.log('Running migration 7 (fix billing unique index to include bill_type)...');
+    console.log('Running migration 7 (split billing unique index for tenant support)...');
     db.exec(`
       DROP INDEX IF EXISTS idx_one_bill_per_plot_month;
 
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_one_bill_per_plot_month
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_bills_non_tenant_unique
       ON bills(plot_id, billing_month, bill_type)
-      WHERE is_deleted = 0 AND billing_month IS NOT NULL;
+      WHERE is_deleted = 0 AND billing_month IS NOT NULL AND bill_type != 'tenant';
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_bills_tenant_unique
+      ON bills(plot_id, tenant_id, billing_month, bill_type)
+      WHERE is_deleted = 0 AND billing_month IS NOT NULL AND bill_type = 'tenant';
     `);
     db.prepare(`UPDATE settings SET value = '7' WHERE key = 'schema_version'`).run();
     currentVersion = 7;
@@ -743,6 +917,7 @@ function runMigrations() {
     tryAdd(`ALTER TABLE bills ADD COLUMN voided_by INTEGER REFERENCES users(id)`);
     tryAdd(`ALTER TABLE bills ADD COLUMN voided_at DATETIME`);
     tryAdd(`ALTER TABLE bills ADD COLUMN credit_applied DECIMAL(10,2) DEFAULT 0`);
+    tryAdd(`ALTER TABLE bills ADD COLUMN notice TEXT`);
     db.exec(`
       CREATE TABLE IF NOT EXISTS adjustments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -756,18 +931,6 @@ function runMigrations() {
       CREATE INDEX IF NOT EXISTS idx_adjustments_bill_id ON adjustments(bill_id);
       CREATE INDEX IF NOT EXISTS idx_adjustments_house_id ON adjustments(house_id);
     `);
-    db.prepare(`UPDATE settings SET value = '16' WHERE key = 'schema_version'`).run();
-    currentVersion = 16;
-  }
-
-  // Migration 16: bills.notice for per-month remarks printed on challans
-  if (currentVersion < 16) {
-    console.log('Running migration 16 (add bills.notice column)...');
-    try {
-      db.exec(`ALTER TABLE bills ADD COLUMN notice TEXT`);
-    } catch (_) {
-      // Column already exists on some installations.
-    }
     db.prepare(`UPDATE settings SET value = '16' WHERE key = 'schema_version'`).run();
     currentVersion = 16;
   }
@@ -1375,5 +1538,59 @@ function runMigrations() {
 
     db.prepare(`UPDATE settings SET value = '29' WHERE key = 'schema_version'`).run();
     currentVersion = 29;
+  }
+
+  // Migration 30: reporting/performance indexes
+  if (currentVersion < 30) {
+    console.log('Running migration 30 (report performance indexes)...');
+
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_bills_report_date_type
+        ON bills(is_deleted, bill_type, bill_date);
+
+      CREATE INDEX IF NOT EXISTS idx_bills_report_month
+        ON bills(is_deleted, billing_month, bill_type, plot_id, tenant_id);
+
+      CREATE INDEX IF NOT EXISTS idx_payments_report_date_bill
+        ON payments(payment_date, bill_id);
+
+      CREATE INDEX IF NOT EXISTS idx_ledger_entries_report_debit
+        ON ledger_entries(entry_date, debit_account_id);
+
+      CREATE INDEX IF NOT EXISTS idx_ledger_entries_report_credit
+        ON ledger_entries(entry_date, credit_account_id);
+
+      CREATE INDEX IF NOT EXISTS idx_bill_items_bill_charge
+        ON bill_items(bill_id, charge_name);
+    `);
+
+    db.prepare(`UPDATE settings SET value = '30' WHERE key = 'schema_version'`).run();
+    currentVersion = 30;
+  }
+
+  // Safety repair: older installations may already be on a high schema_version
+  // but still miss bills metadata columns due to legacy migration gate bugs.
+  try {
+    ensureBillsVoidMetadata(db);
+  } catch (e) {
+    console.warn('Schema repair check for bills metadata failed:', e?.message || e);
+  }
+
+  try {
+    ensureBillsUniquenessIndexes(db);
+  } catch (e) {
+    console.warn('Schema repair check for bill uniqueness indexes failed:', e?.message || e);
+  }
+
+  try {
+    normalizeAccountBalances(db);
+  } catch (e) {
+    console.warn('Schema repair check for account balances failed:', e?.message || e);
+  }
+
+  try {
+    ensureMemberTenantIdentityMetadata(db);
+  } catch (e) {
+    console.warn('Schema repair check for member/tenant identity metadata failed:', e?.message || e);
   }
 }

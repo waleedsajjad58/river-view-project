@@ -73,7 +73,7 @@ export default function SettingsPage() {
         setIsBackingUp(true)
         try {
             const result = await ipc.invoke('db:create-backup')
-            showMsg(`Backup created: ${result.path}`)
+            showMsg(`Backup created in Downloads: ${result.path}`)
             load()
         } catch (e: any) {
             showMsg(`Error: ${e.message}`, 'error')
@@ -84,8 +84,41 @@ export default function SettingsPage() {
 
     const handleSaveSettings = async () => {
         try {
-            const updates = EDITABLE_SETTINGS.map(s => ({ key: s.key, value: settings[s.key] || '' }))
+            const dueDays = Number.parseInt(String(settings.default_due_days || '').trim(), 10)
+            if (!Number.isFinite(dueDays) || dueDays < 0) {
+                showMsg('Default Due Days must be a non-negative whole number', 'error')
+                return
+            }
+
+            const lateFeeType = String(settings.late_fee_type || '').trim().toLowerCase()
+            if (!['flat', 'percentage'].includes(lateFeeType)) {
+                showMsg('Late Fee Type must be flat or percentage', 'error')
+                return
+            }
+
+            const lateFeeValue = Number.parseFloat(String(settings.late_fee_value || '').trim())
+            if (!Number.isFinite(lateFeeValue) || lateFeeValue < 0) {
+                showMsg('Late Fee Amount / % must be a non-negative number', 'error')
+                return
+            }
+
+            const tenantChallanAmount = Number.parseFloat(String(settings.tenant_challan_amount || '').trim())
+            if (!Number.isFinite(tenantChallanAmount) || tenantChallanAmount < 0) {
+                showMsg('Tenant Challan Amount must be a non-negative number', 'error')
+                return
+            }
+
+            const normalized: Record<string, string> = {
+                ...settings,
+                default_due_days: String(dueDays),
+                late_fee_type: lateFeeType,
+                late_fee_value: String(lateFeeValue),
+                tenant_challan_amount: String(tenantChallanAmount),
+            }
+
+            const updates = EDITABLE_SETTINGS.map(s => ({ key: s.key, value: normalized[s.key] || '' }))
             await ipc.invoke('db:update-settings-bulk', updates)
+            setSettings(normalized)
             setSettingsDirty(false)
             showMsg('Settings saved successfully')
         } catch (e: any) {
@@ -199,7 +232,7 @@ export default function SettingsPage() {
                     {section === 'society' && <>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
                             <h3>Society Information</h3>
-                            {settingsDirty && <button className="btn btn-primary" onClick={handleSaveSettings}><Save size={16} /> Save Changes</button>}
+                            <button className="btn btn-primary" onClick={handleSaveSettings} disabled={!settingsDirty}><Save size={16} /> Save Changes</button>
                         </div>
                         <div className="form-grid">
                             {EDITABLE_SETTINGS.map(s => (
@@ -215,11 +248,9 @@ export default function SettingsPage() {
                                 </div>
                             ))}
                         </div>
-                        {settingsDirty && (
-                            <div style={{ marginTop: '1.5rem', display: 'flex', justifyContent: 'flex-end' }}>
-                                <button className="btn btn-primary" onClick={handleSaveSettings}><Save size={16} /> Save Changes</button>
-                            </div>
-                        )}
+                        <div style={{ marginTop: '1.5rem', display: 'flex', justifyContent: 'flex-end' }}>
+                            <button className="btn btn-primary" onClick={handleSaveSettings} disabled={!settingsDirty}><Save size={16} /> Save Changes</button>
+                        </div>
                     </>}
 
                     {/* ── Bill Rates ── */}
@@ -322,7 +353,7 @@ export default function SettingsPage() {
                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem', marginBottom: '2rem' }}>
                             <div style={{ padding: '1.25rem', background: 'var(--bg-card)', borderRadius: '10px', border: '1px solid var(--border)' }}>
                                 <h4 style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.75rem' }}><Database size={18} color="var(--accent)" /> Database Backup</h4>
-                                <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1rem', lineHeight: 1.5 }}>Creates a full snapshot stored in your AppData folder.</p>
+                                <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1rem', lineHeight: 1.5 }}>Creates a full snapshot stored in your Downloads folder.</p>
                                 <button className="btn btn-primary" style={{ width: '100%', justifyContent: 'center' }} onClick={handleBackup} disabled={isBackingUp}>
                                     {isBackingUp ? <><RefreshCw size={16} /> Creating...</> : <><HardDrive size={16} /> Create Backup</>}
                                 </button>

@@ -8,6 +8,12 @@ type Tab = 'trial-balance' | 'defaulters' | 'fund-summary' | 'income-expenditure
 
 export default function ReportsPage() {
     const [tab, setTab] = useState<Tab>('trial-balance')
+    const reportTabs = [
+        { id: 'trial-balance', label: 'Trial Balance', icon: <FileText size={16} /> },
+        { id: 'defaulters', label: 'Defaulters', icon: <RefreshCw size={16} /> },
+        { id: 'fund-summary', label: 'Fund Summary', icon: <Layers size={16} />, hidden: true },
+        { id: 'income-expenditure', label: 'Income & Expenditure', icon: <TrendingUp size={16} /> },
+    ].filter((tabItem) => !tabItem.hidden) as { id: Tab; label: string; icon: any }[]
 
     return (
         <div className="page">
@@ -19,12 +25,7 @@ export default function ReportsPage() {
             </div>
 
             <div className="report-tabs" style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.5rem', borderBottom: '1px solid var(--border)', paddingBottom: '0.75rem' }}>
-                {([
-                    { id: 'trial-balance', label: 'Trial Balance', icon: <FileText size={16} /> },
-                    { id: 'defaulters', label: 'Defaulters', icon: <RefreshCw size={16} /> },
-                    { id: 'fund-summary', label: 'Fund Summary', icon: <Layers size={16} /> },
-                    { id: 'income-expenditure', label: 'Income & Expenditure', icon: <TrendingUp size={16} /> },
-                ] as { id: Tab; label: string; icon: any }[]).map(t => (
+                {reportTabs.map(t => (
                     <button
                         key={t.id}
                         className={`btn ${tab === t.id ? 'btn-primary' : 'btn-ghost'}`}
@@ -61,8 +62,8 @@ function TrialBalanceReport() {
 
     useEffect(() => { load() }, [load])
 
-    const totalDebit = data.reduce((s, r) => s + r.total_debit, 0)
-    const totalCredit = data.reduce((s, r) => s + r.total_credit, 0)
+    const totalDebit = data.reduce((s, r) => s + Number(r.total_debit || 0), 0)
+    const totalCredit = data.reduce((s, r) => s + Number(r.total_credit || 0), 0)
 
     return (
         <div>
@@ -897,6 +898,9 @@ function BalanceSheetReport() {
         </div>
     )
 }
+
+const preserveHiddenReports = [CollectionSummary, BalanceSheetReport]
+void preserveHiddenReports
 
 // ── CSV Export Utility ────────────────────────────────────────
 

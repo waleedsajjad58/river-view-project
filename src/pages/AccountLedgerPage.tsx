@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { BookOpen, Search, TrendingUp, TrendingDown, Minus, Printer, BookMarked, ScrollText, BarChart3, ArrowRight, Plus } from 'lucide-react'
+import { BookOpen, Search, TrendingUp, TrendingDown, Minus, Printer, BookMarked, ScrollText, BarChart3, ArrowRight, FileDown } from 'lucide-react'
+import { exportExcelFile } from '../utils/exportExcel'
 
 const ipc = (window as any).ipcRenderer
 const fmt  = (n: number) => `Rs. ${(n || 0).toLocaleString()}`
@@ -48,10 +49,6 @@ export default function AccountLedgerPage() {
   const [entries,     setEntries]     = useState<any[]>([])
   const [headings,    setHeadings]    = useState<any[]>([])
   const [headingsLoading, setHeadingsLoading] = useState(false)
-  const [newExpenseHeader, setNewExpenseHeader] = useState('')
-  const [addingExpenseHeader, setAddingExpenseHeader] = useState(false)
-  const [expenseHeaderMsg, setExpenseHeaderMsg] = useState('')
-  const [expenseHeaderErr, setExpenseHeaderErr] = useState('')
   const [search,      setSearch]      = useState('')
   const [loading,     setLoading]     = useState(false)
   const [startDate,   setStartDate]   = useState(
@@ -144,12 +141,6 @@ export default function AccountLedgerPage() {
     return acc
   }, {})
 
-  const disconnectedHeadings = headings.filter((h: any) =>
-    Number(h.entry_count || 0) === 0 &&
-    !h.parent_id &&
-    Number(h.child_count || 0) === 0
-  )
-
   // ── Print ──────────────────────────────────────────────────
   const handlePrint = async () => {
     if (!selected) return
@@ -192,28 +183,70 @@ export default function AccountLedgerPage() {
     doc.save(`ledger-${selected.account_code}-${startDate}-${endDate}.pdf`)
   }
 
-  const handleAddExpenseHeader = async () => {
-    const name = newExpenseHeader.trim()
-    if (!name) {
-      setExpenseHeaderErr('Enter a header name')
-      return
-    }
+  const headingRowsForExport = typeOrder.flatMap((type) =>
+    (groupedHeadings[type]?.rows || []).map((a: any) => ({
+      account_type: typeLabel[a.account_type] || a.account_type,
+      account_code: a.account_code,
+      account_name: a.account_name,
+      debit: Number(a.total_debit || 0),
+      credit: Number(a.total_credit || 0),
+      entry_count: Number(a.entry_count || 0),
+    }))
+  )
 
-    setAddingExpenseHeader(true)
-    setExpenseHeaderErr('')
-    setExpenseHeaderMsg('')
-    try {
-      const r = await ipc.invoke('db:add-expense-ledger-header', { name })
-      const refreshed = await ipc.invoke('db:get-accounts')
-      setAccounts(refreshed || [])
-      loadHeadings()
-      setNewExpenseHeader('')
-      setExpenseHeaderMsg(`Created ${r.accountCode} - ${name}`)
-    } catch (e: any) {
-      setExpenseHeaderErr(e.message || 'Failed to create expense header')
-    } finally {
-      setAddingExpenseHeader(false)
-    }
+  const exportHeadingsExcel = async () => {
+    if (!headingRowsForExport.length) return
+    await exportExcelFile({
+      fileName: `general-ledger-headers-${startDate}-to-${endDate}`,
+      sheetName: 'General Ledger',
+      title: 'River View Cooperative Housing Society Ltd.',
+      subtitle: `General Ledger Header Summary (${startDate} to ${endDate})`,
+      headers: ['Type', 'Code', 'Header', 'Debit (Rs.)', 'Credit (Rs.)', 'Entries'],
+      rows: headingRowsForExport.map((r: any) => [
+        r.account_type,
+        r.account_code,
+        r.account_name,
+        r.debit,
+        r.credit,
+        r.entry_count,
+      ]),
+      numericColumns: [3, 4, 5],
+    })
+  }
+
+  const printHeadingsPdf = async () => {
+    if (!headingRowsForExport.length) return
+    const { default: jsPDF } = await import('jspdf')
+    const { default: autoTable } = await import('jspdf-autotable')
+    const doc = new jsPDF('landscape')
+
+    doc.setFontSize(16)
+    doc.setFont('helvetica', 'bold')
+    doc.text('River View Co-operative Housing Society', 148, 14, { align: 'center' })
+    doc.setFontSize(12)
+    doc.text('General Ledger Header Summary', 148, 21, { align: 'center' })
+    doc.setFontSize(10)
+    doc.setFont('helvetica', 'normal')
+    doc.text(`Period: ${startDate} to ${endDate}`, 148, 27, { align: 'center' })
+
+    autoTable(doc, {
+      startY: 33,
+      head: [['Type', 'Code', 'Header', 'Debit (Rs.)', 'Credit (Rs.)', 'Entries']],
+      body: headingRowsForExport.map((r: any) => [
+        r.account_type,
+        r.account_code,
+        r.account_name,
+        r.debit > 0 ? r.debit.toLocaleString() : '0',
+        r.credit > 0 ? r.credit.toLocaleString() : '0',
+        String(r.entry_count || 0),
+      ]),
+      theme: 'grid',
+      headStyles: { fillColor: [29, 78, 216] },
+      styles: { fontSize: 8.5 },
+      columnStyles: { 3: { halign: 'right' }, 4: { halign: 'right' } },
+    })
+
+    doc.save(`general-ledger-headers-${startDate}-to-${endDate}.pdf`)
   }
 
   // ── Render ─────────────────────────────────────────────────
@@ -320,24 +353,27 @@ export default function AccountLedgerPage() {
 
             <div style={{
               background: '#fff', border: '1px solid var(--border)', borderRadius: 'var(--r-lg, 8px)',
-              padding: '14px 16px', marginBottom: 18,
+              padding: '12px 14px', marginBottom: 16,
+              display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap',
             }}>
-              <div style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--t-primary)', marginBottom: 8, fontFamily: 'IBM Plex Mono', letterSpacing: '0.04em' }}>
-                ADD EXPENSE LEDGER HEADER
+              <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8, flexWrap: 'wrap' }}>
+                <div className="form-group" style={{ marginBottom: 0 }}>
+                  <label style={{ fontSize: 12, marginBottom: 4 }}>From</label>
+                  <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} style={{ height: 32, fontSize: 12.5 }} />
+                </div>
+                <div className="form-group" style={{ marginBottom: 0 }}>
+                  <label style={{ fontSize: 12, marginBottom: 4 }}>To</label>
+                  <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} style={{ height: 32, fontSize: 12.5 }} />
+                </div>
               </div>
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                <input
-                  value={newExpenseHeader}
-                  onChange={e => { setNewExpenseHeader(e.target.value); setExpenseHeaderErr(''); setExpenseHeaderMsg('') }}
-                  placeholder="e.g. Water Tanker Expenses"
-                  style={{ flex: 1, height: 34, fontSize: 12.5 }}
-                />
-                <button className="btn btn-primary" onClick={handleAddExpenseHeader} disabled={addingExpenseHeader} style={{ height: 34 }}>
-                  <Plus size={14} /> {addingExpenseHeader ? 'Adding...' : 'Add'}
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button className="btn btn-ghost" style={{ height: 32, fontSize: 12.5 }} onClick={printHeadingsPdf} disabled={headingsLoading || headingRowsForExport.length === 0}>
+                  <Printer size={13} /> Print PDF
+                </button>
+                <button className="btn btn-ghost" style={{ height: 32, fontSize: 12.5 }} onClick={exportHeadingsExcel} disabled={headingsLoading || headingRowsForExport.length === 0}>
+                  <FileDown size={13} /> Export Excel
                 </button>
               </div>
-              {expenseHeaderErr && <div style={{ marginTop: 8, fontSize: 12, color: '#b91c1c' }}>{expenseHeaderErr}</div>}
-              {expenseHeaderMsg && <div style={{ marginTop: 8, fontSize: 12, color: '#15803d' }}>{expenseHeaderMsg}</div>}
             </div>
 
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16 }}>
@@ -400,8 +436,10 @@ export default function AccountLedgerPage() {
             {/* Account summary */}
             {accounts.length > 0 && (
               <div style={{ marginTop: 28 }}>
-                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--t-muted)', marginBottom: 12, fontFamily: 'IBM Plex Mono', letterSpacing: '0.04em' }}>
-                  CHART OF ACCOUNTS MASTER RECORDS ({startDate} to {endDate})
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12, gap: 8, flexWrap: 'wrap' }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--t-muted)', fontFamily: 'IBM Plex Mono', letterSpacing: '0.04em' }}>
+                    CHART OF ACCOUNTS MASTER RECORDS ({startDate} to {endDate})
+                  </div>
                 </div>
                 <div style={{ background: '#fff', border: '1px solid var(--border)', borderRadius: 'var(--r-lg, 8px)', overflow: 'hidden' }}>
                   {typeOrder.map(type => {
@@ -461,11 +499,6 @@ export default function AccountLedgerPage() {
                 </div>
                 {headingsLoading && (
                   <div style={{ fontSize: 12, color: 'var(--t-faint)', marginTop: 8 }}>Syncing ledger heading summaries…</div>
-                )}
-                {!headingsLoading && disconnectedHeadings.length > 0 && (
-                  <div style={{ marginTop: 12, fontSize: 12, color: '#b91c1c', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 6, padding: '8px 10px' }}>
-                    Disconnected headings detected: {disconnectedHeadings.map((d: any) => `${d.account_code} ${d.account_name}`).join(', ')}
-                  </div>
                 )}
               </div>
             )}

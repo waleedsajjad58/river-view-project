@@ -17,6 +17,13 @@ process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL ? path.join(process.env.APP_ROOT, 
 
 let win: any
 
+function isPastBillingMonth(monthValue: string) {
+  const month = String(monthValue || '').slice(0, 7)
+  if (!/^\d{4}-\d{2}$/.test(month)) return false
+  const current = new Date().toISOString().slice(0, 7)
+  return month < current
+}
+
 function createWindow() {
   win = new BrowserWindow({
     width: 1280,
@@ -204,6 +211,10 @@ ipcMain.handle('db:remove-tenant', (_e: any, id: number) => {
 
 // ── Phase 3: Bill Generation ─────────────────────────────────
 ipcMain.handle('db:generate-monthly-bills', (_e: any, { billingMonth }: any) => {
+  if (!billingMonth) throw new Error('Billing month is required')
+  if (isPastBillingMonth(billingMonth)) {
+    throw new Error('Generating bills for previous months is not allowed. Select current or future month.')
+  }
   const db = getDb()
   const plots = db.prepare('SELECT * FROM plots WHERE is_deleted = 0').all() as any[]
   const templates = db.prepare('SELECT * FROM bill_templates WHERE is_active = 1 ORDER BY sort_order').all() as any[]
@@ -457,13 +468,20 @@ ipcMain.handle('db:create-special-bill', (_e: any, { plotId, chargeName, amount,
   const prefix = settings?.value || 'RV-'
   const today = new Date().toISOString().split('T')[0]
 
-  let dueDateStr = dueDate
+  let dueDateStr = dueDate ? String(dueDate).slice(0, 10) : ''
   if (!dueDateStr) {
     const dueSettings = db.prepare("SELECT value FROM settings WHERE key = 'default_due_days'").get() as any
     const dueDays = parseInt(dueSettings?.value || '15')
     const dueDateObj = new Date()
     dueDateObj.setDate(dueDateObj.getDate() + dueDays)
     dueDateStr = dueDateObj.toISOString().split('T')[0]
+  }
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dueDateStr)) {
+    throw new Error('Invalid due date format. Use YYYY-MM-DD.')
+  }
+  if (dueDateStr < today) {
+    throw new Error('Past due date is not allowed for special challans.')
   }
 
   const count = db.prepare('SELECT COUNT(*) as c FROM bills').get() as any
