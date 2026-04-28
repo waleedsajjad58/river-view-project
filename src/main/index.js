@@ -172,7 +172,6 @@ function normalizePlotPayload(plot = {}) {
 
 function recalcPlotBills() {
     return { skipped: true };
-}
 
 function isPastBillingMonth(monthValue) {
     const month = String(monthValue || '').slice(0, 7);
@@ -209,16 +208,19 @@ function sumStoredArrears(db, { plotId = null, tenantId = null, billingMonth = n
         params.push(billType);
     }
 
+    // Return the unpaid balance from the most recent outstanding bill prior to the billingMonth
     const row = db.prepare(`
-        SELECT COALESCE(SUM(
+        SELECT (
             CASE
                 WHEN (COALESCE(b.total_amount, 0) - COALESCE(b.amount_paid, 0)) > 0
                 THEN (COALESCE(b.total_amount, 0) - COALESCE(b.amount_paid, 0))
                 ELSE 0
             END
-        ), 0) as total
+        ) as total
         FROM bills b
         WHERE ${where.join(' AND ')}
+        ORDER BY b.billing_month DESC, b.id DESC
+        LIMIT 1
     `).get(...params);
 
     return row?.total || 0;
@@ -357,6 +359,8 @@ ipcMain.handle('db:add-plot', (_e, plot) => {
     const db = getDb();
     const normalized = normalizePlotPayload(plot);
     if (!normalized.plot_number) throw new Error('Plot number is required');
+    const ownerId = Number(plot.addOwnerId || plot.assignOwnerId);
+    if (!ownerId) throw new Error('Owner is required');
 
     return db.transaction(() => {
         const result = db.prepare(`
@@ -379,15 +383,10 @@ ipcMain.handle('db:add-plot', (_e, plot) => {
         );
 
         const plotId = result.lastInsertRowid;
-        if (plot.addOwnerId || plot.assignOwnerId) {
-            const memberId = Number(plot.addOwnerId || plot.assignOwnerId);
-            if (memberId) {
-                db.prepare(`
-                    INSERT INTO plot_ownership (plot_id, member_id, start_date)
-                    VALUES (?, ?, ?)
-                `).run(plotId, memberId, plot.ownerStartDate || new Date().toISOString().split('T')[0]);
-            }
-        }
+        db.prepare(`
+            INSERT INTO plot_ownership (plot_id, member_id, start_date)
+            VALUES (?, ?, ?)
+        `).run(plotId, ownerId, plot.ownerStartDate || new Date().toISOString().split('T')[0]);
 
         writeAuditLog(db, 'plots', plotId, 'CREATE', {
             plot_number: normalized.plot_number,
@@ -512,13 +511,15 @@ ipcMain.handle('db:get-plot-statement', (_e, plotId) => {
         ).get();
 
         bills = db.prepare(`
-            SELECT b.*,
+             SELECT b.*,
+                 m.name as billed_owner_name,
                    b.subtotal as current_charges,
                    b.arrears as previous_dues,
                    b.balance_due as actual_balance,
                    ${hasAdjustments ? "COALESCE((SELECT SUM(a.amount) FROM adjustments a WHERE a.bill_id = b.id), 0)" : '0'} as adjustment_total,
                    (SELECT GROUP_CONCAT(bi.charge_name, ', ') FROM bill_items bi WHERE bi.bill_id = b.id) as charge_names
             FROM bills b
+             LEFT JOIN members m ON m.id = b.member_id
             WHERE b.plot_id = ? AND b.is_deleted = 0
             ORDER BY b.bill_date DESC
         `).all(plotId);
@@ -526,12 +527,14 @@ ipcMain.handle('db:get-plot-statement', (_e, plotId) => {
         if (!String(err?.message || '').toLowerCase().includes('no such table: adjustments')) throw err;
         bills = db.prepare(`
             SELECT b.*,
+                   m.name as billed_owner_name,
                    b.subtotal as current_charges,
                    b.arrears as previous_dues,
                    b.balance_due as actual_balance,
                    0 as adjustment_total,
                    (SELECT GROUP_CONCAT(bi.charge_name, ', ') FROM bill_items bi WHERE bi.bill_id = b.id) as charge_names
             FROM bills b
+            LEFT JOIN members m ON m.id = b.member_id
             WHERE b.plot_id = ? AND b.is_deleted = 0
             ORDER BY b.bill_date DESC
         `).all(plotId);
@@ -545,7 +548,45 @@ ipcMain.handle('db:get-plot-statement', (_e, plotId) => {
     const specialCount = bills.filter(b => b.bill_type === 'special').length;
     const generalCount = bills.filter(b => b.bill_type === 'general').length;
 
-    return { plot, bills, summary: { totalBilled, totalPaid, totalOutstanding, unpaidCount, monthlyCount, specialCount, generalCount } };
+    const ownerBreakdownMap = new Map();
+    for (const bill of bills) {
+        const ownerKey = bill.member_id ? String(bill.member_id) : 'unassigned';
+        const ownerName = bill.billed_owner_name || 'Unassigned at bill time';
+        const outstanding = ['unpaid', 'partial', 'overdue'].includes(bill.status) ? (bill.balance_due || 0) : 0;
+        const existing = ownerBreakdownMap.get(ownerKey) || {
+            ownerKey,
+            memberId: bill.member_id || null,
+            ownerName,
+            totalBilled: 0,
+            totalPaid: 0,
+            totalOutstanding: 0,
+            unpaidCount: 0,
+            billCount: 0,
+        };
+        existing.totalBilled += (bill.total_amount || 0);
+        existing.totalPaid += (bill.amount_paid || 0);
+        existing.totalOutstanding += outstanding;
+        existing.billCount += 1;
+        if (outstanding > 0.01) existing.unpaidCount += 1;
+        ownerBreakdownMap.set(ownerKey, existing);
+    }
+    const ownerBreakdown = Array.from(ownerBreakdownMap.values())
+        .sort((a, b) => (b.totalOutstanding - a.totalOutstanding) || (b.totalBilled - a.totalBilled));
+
+    return {
+        plot,
+        bills,
+        summary: {
+            totalBilled,
+            totalPaid,
+            totalOutstanding,
+            unpaidCount,
+            monthlyCount,
+            specialCount,
+            generalCount,
+            ownerBreakdown,
+        },
+    };
 });
 
 ipcMain.handle('db:fix-baked-arrears', () => {
@@ -579,6 +620,21 @@ ipcMain.handle('db:assign-owner', (_e, { plotId, memberId, startDate }) => {
     const result = db.prepare('INSERT INTO plot_ownership (plot_id, member_id, start_date) VALUES (?, ?, ?)')
         .run(plotId, memberId, startDate || new Date().toISOString().split('T')[0]);
     writeAuditLog(db, 'plot_ownership', result.lastInsertRowid, 'ASSIGN', { plotId, memberId });
+    return result;
+});
+
+ipcMain.handle('db:update-ownership-start-date', (_e, { ownershipId, startDate }) => {
+    const db = getDb();
+    const date = startDate || new Date().toISOString().split('T')[0];
+    const current = db.prepare('SELECT id, plot_id, member_id, start_date FROM plot_ownership WHERE id = ?').get(ownershipId);
+    if (!current) throw new Error('Ownership record not found');
+    const result = db.prepare('UPDATE plot_ownership SET start_date = ? WHERE id = ?').run(date, ownershipId);
+    writeAuditLog(db, 'plot_ownership', ownershipId, 'UPDATE', {
+        plotId: current.plot_id,
+        memberId: current.member_id,
+        oldStartDate: current.start_date,
+        newStartDate: date,
+    });
     return result;
 });
 
@@ -1009,6 +1065,8 @@ ipcMain.handle('db:generate-monthly-bills', (_e, { billingMonth, notice }) => {
 
         for (const plot of plots) {
             const owner = db.prepare("SELECT member_id FROM plot_ownership WHERE plot_id = ? AND (end_date IS NULL OR end_date = '') ORDER BY start_date DESC, id DESC LIMIT 1").get(plot.id);
+            // Skip plots without an owner — monthly bills require an assigned owner
+            if (!owner) continue;
             const existing = db.prepare("SELECT id, status, arrears FROM bills WHERE plot_id = ? AND billing_month = ? AND bill_type = 'monthly' AND is_deleted = 0").get(plot.id, billingMonth);
             if (!existing) {
                 const items = [];
@@ -2413,7 +2471,7 @@ ipcMain.handle('db:print-month-challans', (_e, { billingMonth }) => {
     if (!billingMonth) throw new Error('Billing month is required');
 
     const bills = db.prepare(`
-        SELECT b.id
+        SELECT b.id, b.bill_type, b.member_id, b.plot_id, p.plot_number
         FROM bills b
         LEFT JOIN plots p ON p.id = b.plot_id
         WHERE b.is_deleted = 0
@@ -2425,6 +2483,19 @@ ipcMain.handle('db:print-month-challans', (_e, { billingMonth }) => {
 
     if (bills.length === 0) {
         throw new Error(`No challans found for ${billingMonth}`);
+    }
+
+    // Validate that monthly bills have owners
+    for (const bill of bills) {
+        if (bill.bill_type === 'monthly' && bill.plot_id) {
+            const hasOwnerAtBillTime = !!bill.member_id;
+            const hasCurrentOwner = !!db.prepare(
+                'SELECT member_id FROM plot_ownership WHERE plot_id = ? AND (end_date IS NULL OR end_date = "")'
+            ).get(bill.plot_id);
+            if (!hasOwnerAtBillTime && !hasCurrentOwner) {
+                throw new Error(`Cannot print bill for unassigned plot ${bill.plot_number}. Assign an owner first.`);
+            }
+        }
     }
 
     for (const bill of bills) {
@@ -2441,7 +2512,7 @@ ipcMain.handle('db:export-month-challans-pdf', async (_e, { billingMonth }) => {
 
     const db = getDb();
     const bills = db.prepare(`
-        SELECT b.id
+        SELECT b.id, b.bill_type, b.member_id, b.plot_id, p.plot_number
         FROM bills b
         LEFT JOIN plots p ON p.id = b.plot_id
         WHERE b.is_deleted = 0
@@ -2453,6 +2524,19 @@ ipcMain.handle('db:export-month-challans-pdf', async (_e, { billingMonth }) => {
 
     if (bills.length === 0) {
         throw new Error(`No challans found for ${billingMonth}`);
+    }
+
+    // Validate that monthly bills have owners
+    for (const bill of bills) {
+        if (bill.bill_type === 'monthly' && bill.plot_id) {
+            const hasOwnerAtBillTime = !!bill.member_id;
+            const hasCurrentOwner = !!db.prepare(
+                'SELECT member_id FROM plot_ownership WHERE plot_id = ? AND (end_date IS NULL OR end_date = "")'
+            ).get(bill.plot_id);
+            if (!hasOwnerAtBillTime && !hasCurrentOwner) {
+                throw new Error(`Cannot export bill for unassigned plot ${bill.plot_number}. Assign an owner first.`);
+            }
+        }
     }
 
     const preferredFolderPath = join(app.getPath('downloads'), `challans-${billingMonth}`);
@@ -4289,7 +4373,7 @@ ipcMain.handle('db:print-challan', (_e, { billId, amount, remarks }) => {
         printChallan(html);
     } catch (err) {
         console.error(`[print-challan] Error for bill ${billId}:`, err);
-        throw new Error(`Print failed: ${err.message}`);
+        throw new Error(err.message || `Print failed: ${err}`);
     }
 });
 

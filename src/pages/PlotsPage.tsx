@@ -384,6 +384,7 @@ function PlotStatement({ plotId, onPaymentSaved }: { plotId: number, onPaymentSa
     if (!data) return null
 
     const { summary, bills, plot } = data
+    const ownerBreakdown = summary.ownerBreakdown || []
 
     const displayed = bills.filter((b: any) => {
         if (filter === 'monthly') return b.bill_type === 'monthly'
@@ -441,6 +442,45 @@ function PlotStatement({ plotId, onPaymentSaved }: { plotId: number, onPaymentSa
                 </div>
             )}
 
+            {/* ── Owner-wise due split (helps after transfers) ── */}
+            {ownerBreakdown.length > 0 && (
+                <div style={{ marginBottom: 14 }}>
+                    <div style={{
+                        fontSize: 10, fontWeight: 700, textTransform: 'uppercase',
+                        letterSpacing: '0.08em', color: 'var(--t-faint)',
+                        fontFamily: 'IBM Plex Mono', marginBottom: 8
+                    }}>
+                        Owner-wise Due Split
+                    </div>
+                    <div className="table-wrap">
+                        <table className="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Owner (at bill time)</th>
+                                    <th style={{ textAlign: 'right' }}>Bills</th>
+                                    <th style={{ textAlign: 'right' }}>Billed</th>
+                                    <th style={{ textAlign: 'right' }}>Paid</th>
+                                    <th style={{ textAlign: 'right' }}>Outstanding</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {ownerBreakdown.map((o: any) => (
+                                    <tr key={o.ownerKey}>
+                                        <td style={{ fontWeight: 500 }}>{o.ownerName}</td>
+                                        <td className="td-mono">{o.billCount}</td>
+                                        <td className="td-mono">{(o.totalBilled || 0).toLocaleString()}</td>
+                                        <td className="td-mono" style={{ color: 'var(--c-paid)' }}>{(o.totalPaid || 0).toLocaleString()}</td>
+                                        <td className="td-mono" style={{ color: (o.totalOutstanding || 0) > 0 ? 'var(--c-overdue)' : 'var(--t-faint)' }}>
+                                            {(o.totalOutstanding || 0) > 0 ? (o.totalOutstanding || 0).toLocaleString() : '—'}
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            )}
+
             {/* ── Filter + print bar ── */}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
                 <div style={{ display: 'flex', gap: 4 }}>
@@ -490,6 +530,7 @@ function PlotStatement({ plotId, onPaymentSaved }: { plotId: number, onPaymentSa
                         <tr>
                             <th>Bill #</th>
                             <th style={{ width: 80 }}>Type</th>
+                            <th>Owner</th>
                             <th>Month / Date</th>
                             <th style={{ textAlign: 'right' }}>Total</th>
                             <th style={{ textAlign: 'right' }}>Paid</th>
@@ -500,7 +541,7 @@ function PlotStatement({ plotId, onPaymentSaved }: { plotId: number, onPaymentSa
                     </thead>
                     <tbody>
                         {displayed.length === 0 ? (
-                            <tr><td colSpan={8} style={{
+                            <tr><td colSpan={9} style={{
                                 textAlign: 'center', padding: 32,
                                 color: 'var(--t-faint)', fontSize: 13
                             }}>
@@ -517,6 +558,7 @@ function PlotStatement({ plotId, onPaymentSaved }: { plotId: number, onPaymentSa
                                         {b.bill_type === 'special' ? 'Special' : b.bill_type === 'general' ? 'General' : 'Monthly'}
                                     </span>
                                 </td>
+                                <td style={{ fontSize: 12 }}>{b.billed_owner_name || '—'}</td>
                                 <td style={{ fontFamily: 'IBM Plex Mono', fontSize: 12, color: 'var(--t-muted)' }}>
                                     {b.billing_month || b.bill_date}
                                 </td>
@@ -544,7 +586,7 @@ function PlotStatement({ plotId, onPaymentSaved }: { plotId: number, onPaymentSa
                     {displayed.length > 0 && (
                         <tfoot>
                             <tr style={{ borderTop: '2px solid var(--border-strong)', background: 'var(--bg-subtle)' }}>
-                                <td colSpan={3} style={{
+                                <td colSpan={4} style={{
                                     padding: '8px 16px', fontSize: 11, fontFamily: 'IBM Plex Mono',
                                     fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em',
                                     color: 'var(--t-muted)'
@@ -741,6 +783,8 @@ function OwnershipTab({ plot, members, history, onRefresh }: {
     const [transferDate, setTransferDate] = useState(new Date().toISOString().split('T')[0])
     const [transferDeed, setTransferDeed] = useState('')
     const [transferNotes, setTransferNotes] = useState('')
+    const [editOwnership, setEditOwnership] = useState<any>(null)
+    const [editStartDate, setEditStartDate] = useState('')
     const [err, setErr] = useState('')
     const activeOwner = history.find(o => !o.end_date)
 
@@ -761,6 +805,32 @@ function OwnershipTab({ plot, members, history, onRefresh }: {
             })
             onRefresh(); setMode('view')
         } catch (e: any) { setErr(e.message) }
+    }
+
+    const openEditStartDate = (ownership: any) => {
+        setEditOwnership(ownership)
+        setEditStartDate(ownership.start_date || '')
+        setErr('')
+    }
+
+    const handleEditStartDate = async () => {
+        if (!editOwnership) return
+        if (!editStartDate) {
+            setErr('Start date is required')
+            return
+        }
+        setErr('')
+        try {
+            await ipc.invoke('db:update-ownership-start-date', {
+                ownershipId: editOwnership.id,
+                startDate: editStartDate,
+            })
+            setEditOwnership(null)
+            setEditStartDate('')
+            onRefresh()
+        } catch (e: any) {
+            setErr(e.message)
+        }
     }
 
     return (
@@ -797,6 +867,11 @@ function OwnershipTab({ plot, members, history, onRefresh }: {
                     {activeOwner && mode !== 'transfer' && (
                         <button className="btn btn-ghost btn-sm" onClick={() => setMode('transfer')}>
                             <ArrowRightLeft size={12} /> Transfer
+                        </button>
+                    )}
+                    {activeOwner && (
+                        <button className="btn btn-ghost btn-sm" onClick={() => openEditStartDate(activeOwner)}>
+                            <Edit2 size={12} /> Edit Start Date
                         </button>
                     )}
                 </div>
@@ -870,6 +945,32 @@ function OwnershipTab({ plot, members, history, onRefresh }: {
                 </div>
             )}
 
+            {editOwnership && (
+                <div style={{
+                    background: 'var(--bg-subtle)', border: '1px solid var(--border)',
+                    borderRadius: 'var(--r-lg)', padding: 16, marginBottom: 16
+                }}>
+                    <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 12 }}>Edit Start Date</div>
+                    <div className="form-grid" style={{ marginBottom: 12 }}>
+                        <div className="form-group">
+                            <label>Owner</label>
+                            <input type="text" value={editOwnership.owner_name || ''} disabled />
+                        </div>
+                        <div className="form-group">
+                            <label>Start Date *</label>
+                            <input type="date" value={editStartDate} onChange={e => setEditStartDate(e.target.value)} />
+                        </div>
+                    </div>
+                    {err && <div className="msg msg-error" style={{ marginBottom: 10 }}><span>{err}</span></div>}
+                    <div style={{ display: 'flex', gap: 8 }}>
+                        <button className="btn btn-ghost btn-sm" onClick={() => { setEditOwnership(null); setEditStartDate(''); setErr('') }}>Cancel</button>
+                        <button className="btn btn-primary btn-sm" onClick={handleEditStartDate} disabled={!editStartDate}>
+                            <Check size={12} /> Save Date
+                        </button>
+                    </div>
+                </div>
+            )}
+
             <div style={{
                 fontSize: 10, fontWeight: 700, textTransform: 'uppercase',
                 letterSpacing: '0.08em', color: 'var(--t-faint)',
@@ -893,7 +994,14 @@ function OwnershipTab({ plot, members, history, onRefresh }: {
                             }}>No ownership records yet.</td></tr>
                         ) : history.map((o: any) => (
                             <tr key={o.id}>
-                                <td style={{ fontWeight: 500 }}>{o.owner_name}</td>
+                                <td style={{ fontWeight: 500 }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                        <span>{o.owner_name}</span>
+                                        <button className="btn btn-ghost btn-sm" onClick={() => openEditStartDate(o)}>
+                                            <Edit2 size={11} />
+                                        </button>
+                                    </div>
+                                </td>
                                 <td style={{ fontFamily: 'IBM Plex Mono', fontSize: 12, color: 'var(--t-faint)' }}>{o.start_date}</td>
                                 <td style={{ fontFamily: 'IBM Plex Mono', fontSize: 12 }}>
                                     {o.end_date
@@ -1318,6 +1426,7 @@ function AddPlotPanel({ onClose, onSaved }: { onClose: () => void, onSaved: () =
 
     const handleSave = async () => {
         if (!form.plot_number.trim()) { setErr('Plot number is required'); return }
+        if (!assignOwnerId) { setErr('Owner is required'); return }
         setSaving(true)
         try {
             await ipc.invoke('db:add-plot', {
@@ -1355,13 +1464,13 @@ function AddPlotPanel({ onClose, onSaved }: { onClose: () => void, onSaved: () =
                             fontFamily: 'IBM Plex Mono',
                             marginBottom: 8
                         }}>
-                            Assign Current Owner (Optional)
+                                Assign Current Owner *
                         </div>
                         <div className="form-grid">
                             <div className="form-group">
-                                <label>Owner</label>
+                                    <label>Owner *</label>
                                 <select value={assignOwnerId} onChange={e => setAssignOwnerId(e.target.value)}>
-                                    <option value="">No owner now</option>
+                                        <option value="">Select member...</option>
                                     {members.map((m: any) => (
                                         <option key={m.id} value={m.id}>{m.name}</option>
                                     ))}
@@ -1369,7 +1478,7 @@ function AddPlotPanel({ onClose, onSaved }: { onClose: () => void, onSaved: () =
                             </div>
                             <div className="form-group">
                                 <label>Start Date</label>
-                                <input type="date" value={ownerStartDate} onChange={e => setOwnerStartDate(e.target.value)} disabled={!assignOwnerId} />
+                                    <input type="date" value={ownerStartDate} onChange={e => setOwnerStartDate(e.target.value)} />
                             </div>
                         </div>
                     </div>
@@ -1383,7 +1492,7 @@ function AddPlotPanel({ onClose, onSaved }: { onClose: () => void, onSaved: () =
                 <div className="panel-footer" style={{ justifyContent: 'flex-end' }}>
                     <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
                     <button className="btn btn-primary btn-lg" onClick={handleSave}
-                        disabled={saving || !form.plot_number.trim()}>
+                        disabled={saving || !form.plot_number.trim() || !assignOwnerId}>
                         <Check size={15} />
                         {saving ? 'Saving...' : 'Save Plot'}
                     </button>

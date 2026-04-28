@@ -24,6 +24,36 @@ function isPastBillingMonth(monthValue: string) {
   return month < current
 }
 
+function sumStoredArrears(db: any, { plotId = null, tenantId = null, billingMonth = null, billType = null }: any) {
+  const where: string[] = [
+    "(CASE WHEN (COALESCE(b.total_amount, 0) - COALESCE(b.amount_paid, 0)) > 0 THEN (COALESCE(b.total_amount, 0) - COALESCE(b.amount_paid, 0)) ELSE 0 END) > 0.01",
+    'b.is_deleted = 0',
+    "b.status != 'voided'",
+  ]
+  const params: any[] = []
+
+  if (plotId !== null) { where.push('b.plot_id = ?'); params.push(plotId) }
+  if (tenantId !== null) { where.push('b.tenant_id = ?'); params.push(tenantId) }
+  if (billingMonth) { where.push('b.billing_month < ?'); params.push(billingMonth) }
+  if (billType) { where.push('b.bill_type = ?'); params.push(billType) }
+
+  const row = db.prepare(`
+    SELECT (
+      CASE
+        WHEN (COALESCE(b.total_amount, 0) - COALESCE(b.amount_paid, 0)) > 0
+        THEN (COALESCE(b.total_amount, 0) - COALESCE(b.amount_paid, 0))
+        ELSE 0
+      END
+    ) as total
+    FROM bills b
+    WHERE ${where.join(' AND ')}
+    ORDER BY b.billing_month DESC, b.id DESC
+    LIMIT 1
+  `).get(...params)
+
+  return row?.total || 0
+}
+
 function createWindow() {
   win = new BrowserWindow({
     width: 1280,
@@ -169,6 +199,14 @@ ipcMain.handle('db:assign-owner', (_e: any, { plotId, memberId, startDate }: any
   return db.prepare('INSERT INTO plot_ownership (plot_id, member_id, start_date) VALUES (?, ?, ?)').run(plotId, memberId, startDate || new Date().toISOString().split('T')[0])
 })
 
+ipcMain.handle('db:update-ownership-start-date', (_e: any, { ownershipId, startDate }: any) => {
+  const db = getDb()
+  const date = startDate || new Date().toISOString().split('T')[0]
+  const current = db.prepare('SELECT id FROM plot_ownership WHERE id = ?').get(ownershipId)
+  if (!current) throw new Error('Ownership record not found')
+  return db.prepare('UPDATE plot_ownership SET start_date = ? WHERE id = ?').run(date, ownershipId)
+})
+
 ipcMain.handle('db:transfer-ownership', (_e: any, { plotId, newMemberId, transferDate, deedAmount, notes }: any) => {
   const db = getDb()
   const date = transferDate || new Date().toISOString().split('T')[0]
@@ -259,6 +297,40 @@ ipcMain.handle('db:generate-monthly-bills', (_e: any, { billingMonth }: any) => 
         // Still check for tenant below even if no owner charges
       } else {
         const subtotal = items.reduce((sum, i) => sum + i.amount, 0)
+        // Recalculate arrears from the most recent outstanding bill (avoid summing all unpaid bills)
+        let arrears = sumStoredArrears(db, { plotId: plot.id, billingMonth })
+
+        // ── Apply previous dues (one month at a time) ──
+        const previousDue = db.prepare('SELECT * FROM previous_dues WHERE plot_id = ? AND balance_months > 0').get(plot.id)
+        if (previousDue && previousDue.balance_months > 0.01) {
+          // Determine whether the most recent outstanding bill already contains an 'Arrears' row
+          const latestOutstanding = db.prepare(`
+            SELECT id, billing_month FROM bills
+            WHERE plot_id = ? AND is_deleted = 0 AND status != 'paid' AND billing_month < ?
+            ORDER BY billing_month DESC, id DESC LIMIT 1
+          `).get(plot.id, billingMonth)
+
+          let alreadyApplied = false
+          if (latestOutstanding) {
+            const arrearsRow = db.prepare("SELECT amount FROM bill_items WHERE bill_id = ? AND charge_name LIKE '%Arrears%'").get(latestOutstanding.id)
+            if (arrearsRow && Math.abs(Number(arrearsRow.amount || 0) - Number(previousDue.monthly_bill_amount || 0)) < 0.01) {
+              alreadyApplied = true
+            }
+          }
+
+          if (!alreadyApplied) {
+            arrears += previousDue.monthly_bill_amount
+            const newMonthsApplied = (previousDue.months_applied || 0) + 1
+            const newBalanceMonths = previousDue.months_pending - newMonthsApplied
+            db.prepare(`
+              UPDATE previous_dues 
+              SET months_applied = ?, balance_months = ?, updated_at = CURRENT_TIMESTAMP
+              WHERE plot_id = ?
+            `).run(newMonthsApplied, Math.max(0, newBalanceMonths), plot.id)
+          }
+        }
+
+        const total = subtotal + arrears
         const billDate = billingMonth + '-01'
         const dueDate = new Date(billDate)
         dueDate.setDate(dueDate.getDate() + dueDays)
@@ -269,14 +341,13 @@ ipcMain.handle('db:generate-monthly-bills', (_e: any, { billingMonth }: any) => 
         const billNumber = `${prefix}${billingMonth}-${seq}`
 
         const result = db.prepare(`INSERT INTO bills (bill_number, plot_id, member_id, bill_type, bill_date, due_date,
-          billing_month, subtotal, total_amount, balance_due, status) VALUES (?, ?, ?, 'monthly', ?, ?, ?, ?, ?, ?, 'unpaid')`)
-          .run(billNumber, plot.id, owner?.member_id || null, billDate, dueDateStr, billingMonth, subtotal, subtotal, subtotal)
+          billing_month, subtotal, arrears, total_amount, balance_due, status) VALUES (?, ?, ?, 'monthly', ?, ?, ?, ?, ?, ?, ?, 'unpaid')`)
+          .run(billNumber, plot.id, owner?.member_id || null, billDate, dueDateStr, billingMonth, subtotal, arrears, total, total)
 
         const billId = result.lastInsertRowid
         const insertItem = db.prepare('INSERT INTO bill_items (bill_id, charge_name, amount) VALUES (?, ?, ?)')
-        for (const item of items) {
-          insertItem.run(billId, item.charge_name, item.amount)
-        }
+        for (const item of items) insertItem.run(billId, item.charge_name, item.amount)
+        if (arrears > 0.01) insertItem.run(billId, 'Arrears', arrears)
         generated++
       }
 

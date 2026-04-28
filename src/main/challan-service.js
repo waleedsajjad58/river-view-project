@@ -234,6 +234,15 @@ export function generateChallanHTML(billId, customAmount = null, printRemarks = 
 
     if (!row) throw new Error('Bill not found: ' + billId);
 
+    // Check owner requirement: monthly/special bills require an owner (tenant bills don't)
+    if (row.bill_type !== 'tenant' && row.plot_id) {
+        const hasOwnerAtBillTime = !!row.member_id;
+        const hasCurrentOwner = !!String(row.member_code || '').trim();
+        if (!hasOwnerAtBillTime && !hasCurrentOwner) {
+            throw new Error(`Cannot print bill for unassigned plot ${row.plot_number}. Assign an owner first.`);
+        }
+    }
+
     // Resolve member details with simple fail-safe fallbacks:
     // 1) direct bill member, 2) latest plot owner, 3) formatted numeric id.
     let resolvedMemberName = String(row.member_name || '').trim();
